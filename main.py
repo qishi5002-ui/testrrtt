@@ -814,7 +814,6 @@ def shop_home_text(shop_id: int) -> str:
     s = get_shop(shop_id)
 
     if s["panel_until"] and is_panel_active(shop_id):
-if s["panel_until"] and is_panel_active(shop_id):
     left = days_left(s["panel_until"])
     return f"{s['welcome_text']}\n\n🗓 Subscription: {left} day(s) left\n\n— {s['shop_name']}"
 
