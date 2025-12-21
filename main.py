@@ -72,6 +72,15 @@ def safe_username(u) -> Optional[str]:
 def rows(btns: List[InlineKeyboardButton], per_row: int = 2):
     return [btns[i:i+per_row] for i in range(0, len(btns), per_row)]
 
+def days_left(until_iso: str) -> int:
+    try:
+        until = parse_iso(until_iso)
+        secs = (until - now_utc()).total_seconds()
+        if secs <= 0:
+            return 0
+        return int((secs + 86399) // 86400)
+    except Exception:
+        return 0
 
 # ===================== DB =====================
 def db():
@@ -805,8 +814,10 @@ def shop_home_text(shop_id: int) -> str:
     s = get_shop(shop_id)
 
     if s["panel_until"] and is_panel_active(shop_id):
-        return f"{s['welcome_text']}\n\n— {s['shop_name']}"
-    return f"{s['welcome_text']}\n\n{DEFAULT_BRAND}"
+    left = days_left(s["panel_until"])
+    if is_shop_owner(shop_id, int(s["owner_id"])):
+        return f"{s['welcome_text']}\n\n🗓 Subscription: {left} day(s) left\n\n— {s['shop_name']}"
+    return f"{s['welcome_text']}\n\n— {s['shop_name']}"
 
 
 # ===================== CLEAN SEND =====================
@@ -845,6 +856,12 @@ def kb_home(shop_id: int, uid: int) -> InlineKeyboardMarkup:
 
     if res_on:
         grid.insert(0, [InlineKeyboardButton("🧑‍💻 Reseller: ON (Logout)", callback_data="res:logout")])
+
+    def kb_open_files(link: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 Get Files", url=link)],
+        [InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
+    ])
 
     # Owner panel
     if is_shop_owner(shop_id, uid):
@@ -956,26 +973,54 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     # Switch shop
-    if data.startswith("shop:switch:"):
-        target = data.split(":")[-1]
-        if target == "main":
-            set_active_shop_id(ctx, get_main_shop_id())
-        else:
-            try:
-                sid = int(target)
-                if get_shop(sid):
-                    set_active_shop_id(ctx, sid)
-            except Exception:
-                pass
-        shop_id = get_active_shop_id(ctx)
-        ensure_shop_user(shop_id, uid)
-        ctx.user_data["flow"] = None
-        return await q.edit_message_text(shop_home_text(shop_id), reply_markup=kb_home(shop_id, uid))
+    if data.startswith("getfiles:"):
+    pid = int(data.split(":")[1])
+    p = get_product(shop_id, pid)
+    if not p:
+        return await q.answer("Not found", show_alert=True)
+
+    link = (p["telegram_link"] or "").strip()
+    if not link:
+        return await q.answer("No link set.", show_alert=True)
+
+    try:
+        await ctx.bot.delete_message(
+            chat_id=q.message.chat_id,
+            message_id=q.message.message_id
+        )
+    except Exception:
+        pass
+
+    await send_clean_text(
+        chat_id=q.message.chat_id,
+        ctx=ctx,
+        uid=uid,
+        text="📥 Tap the button below to open the files.",
+        reply_markup=kb_open_files(link)
+    )
+    return
 
     # Home menu
     if data == "home:menu":
-        ctx.user_data["flow"] = None
-        return await q.edit_message_text(shop_home_text(shop_id), reply_markup=kb_home(shop_id, uid))
+    ctx.user_data["flow"] = None
+
+    # HARD RESET – cancel EVERYTHING
+    for k in [
+        "dep_amount",
+        "selected_user", "selected_user_page",
+        "res_login_user", "res_tg", "res_login",
+        "pid", "cat_id", "sub_id",
+        "target_deposit",
+        "res_uid",
+        "sa_sel_shop", "sa_sel_user", "sa_sel_page",
+        "sid",
+    ]:
+        ctx.user_data.pop(k, None)
+
+    return await q.edit_message_text(
+        shop_home_text(shop_id),
+        reply_markup=kb_home(shop_id, uid)
+    )
 
     # Wallet screen
     if data == "home:wallet":
