@@ -817,6 +817,8 @@ def shop_home_text(shop_id: int) -> str:
         left = days_left(s["panel_until"])
         return f"{s['welcome_text']}\n\n🗓 Subscription: {left} day(s) left\n\n— {s['shop_name']}"
 
+    return f"{s['welcome_text']}\n\n— {s['shop_name']}"
+    
 # ===================== CLEAN SEND =====================
 async def send_clean_text(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, uid: int, text: str, reply_markup=None, parse_mode=None):
     last_id = get_last_bot_msg_id(uid)
@@ -847,6 +849,44 @@ def kb_open_files(link: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📥 Get Files", url=link)],
         [InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
     ])
+
+def kb_home(shop_id: int, uid: int) -> InlineKeyboardMarkup:
+    ensure_shop_user(shop_id, uid)
+    res_on = reseller_logged_in(shop_id, uid)
+
+    grid = [
+        [InlineKeyboardButton("🛍️ Products", callback_data="home:products"),
+         InlineKeyboardButton("💰 Wallet", callback_data="home:wallet")],
+        [InlineKeyboardButton("📜 History", callback_data="home:history"),
+         InlineKeyboardButton("📩 Support", callback_data="home:support")],
+        [InlineKeyboardButton("🔐 Reseller Login", callback_data="res:login"),
+         InlineKeyboardButton("⭐ Get Own Panel", callback_data="panel:info")],
+    ]
+
+    if res_on:
+        grid.insert(0, [InlineKeyboardButton("🧑‍💻 Reseller: ON (Logout)", callback_data="res:logout")])
+
+    if is_shop_owner(shop_id, uid):
+        if shop_id == get_main_shop_id() and is_super_admin(uid):
+            grid.append([InlineKeyboardButton("🛠️ Owner Panel", callback_data="own:menu")])
+        else:
+            renew_panel_if_needed(shop_id)
+            if is_panel_active(shop_id):
+                grid.append([InlineKeyboardButton("🛠️ Owner Panel", callback_data="own:menu")])
+            else:
+                grid.append([InlineKeyboardButton("🔒 Owner Panel (Get Own Panel Required)", callback_data="panel:info")])
+
+    if shop_id != get_main_shop_id():
+        grid.append([InlineKeyboardButton("⬅️ Back to RekkoShop", callback_data="shop:switch:main")])
+    else:
+        sid = get_shop_by_owner(uid)
+        if sid and sid != get_main_shop_id():
+            grid.append([InlineKeyboardButton("🏪 My Shop", callback_data=f"shop:switch:{sid}")])
+
+    if shop_id == get_main_shop_id() and is_super_admin(uid):
+        grid.append([InlineKeyboardButton("🧾 Platform", callback_data="sa:menu")])
+
+    return InlineKeyboardMarkup(grid)
 
     grid = [
         [InlineKeyboardButton("🛍️ Products", callback_data="home:products"),
@@ -994,27 +1034,30 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # delete old bot message
+if data.startswith("getfiles:"):
+    pid = int(data.split(":")[1])
+    p = get_product(shop_id, pid)
+    if not p:
+        return await q.answer("Not found", show_alert=True)
+
+    link = (p["telegram_link"] or "").strip()
+    if not link:
+        return await q.answer("No link set.", show_alert=True)
+
     try:
-        await ctx.bot.delete_message(
-            chat_id=q.message.chat_id,
-            message_id=q.message.message_id
-        )
+        await ctx.bot.delete_message(chat_id=q.message.chat_id, message_id=q.message.message_id)
     except Exception:
         pass
 
-    # send join button (Telegram will auto-open channel)
-    await ctx.bot.send_message(
+    return await ctx.bot.send_message(
         chat_id=q.message.chat_id,
-        text="📥 Joining private channel…\n\nAfter joining, press Main Menu.",
+        text="📥 Open your files here:",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("➡️ Join Channel", url=link)],
             [InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
         ])
     )
-
-    return
-
+    
     # HARD RESET – cancel EVERYTHING
     for k in [
         "dep_amount",
