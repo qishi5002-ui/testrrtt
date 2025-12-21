@@ -970,7 +970,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     # Switch shop
-    if data.startswith("getfiles:"):
+if data.startswith("getfiles:"):
     pid = int(data.split(":")[1])
     p = get_product(shop_id, pid)
     if not p:
@@ -980,20 +980,20 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not link:
         return await q.answer("No link set.", show_alert=True)
 
+    # delete old bot message
     try:
-        await ctx.bot.delete_message(
-            chat_id=q.message.chat_id,
-            message_id=q.message.message_id
-        )
+        await ctx.bot.delete_message(chat_id=q.message.chat_id, message_id=q.message.message_id)
     except Exception:
         pass
 
-    await send_clean_text(
+    # send button (no link text)
+    await ctx.bot.send_message(
         chat_id=q.message.chat_id,
-        ctx=ctx,
-        uid=uid,
-        text="📥 Tap the button below to open the files.",
-        reply_markup=kb_open_files(link)
+        text="📥 Tap below to open the files:",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📥 Get Files", url=link)],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
+        ])
     )
     return
 
