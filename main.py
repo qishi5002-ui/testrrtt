@@ -982,19 +982,23 @@ if data.startswith("getfiles:"):
 
     # delete old bot message
     try:
-        await ctx.bot.delete_message(chat_id=q.message.chat_id, message_id=q.message.message_id)
+        await ctx.bot.delete_message(
+            chat_id=q.message.chat_id,
+            message_id=q.message.message_id
+        )
     except Exception:
         pass
 
-    # send button (no link text)
+    # send join button (Telegram will auto-open channel)
     await ctx.bot.send_message(
         chat_id=q.message.chat_id,
-        text="📥 Tap below to open the files:",
+        text="📥 Joining private channel…\n\nAfter joining, press Main Menu.",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📥 Get Files", url=link)],
+            [InlineKeyboardButton("➡️ Join Channel", url=link)],
             [InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
         ])
     )
+
     return
 
     # Home menu
