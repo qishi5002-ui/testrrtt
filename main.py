@@ -816,9 +816,7 @@ def shop_home_text(shop_id: int) -> str:
     if s["panel_until"] and is_panel_active(shop_id):
 if s["panel_until"] and is_panel_active(shop_id):
     left = days_left(s["panel_until"])
-    if is_shop_owner(shop_id, int(s["owner_id"])):
-        return f"{s['welcome_text']}\n\n🗓 Subscription: {left} day(s) left\n\n— {s['shop_name']}"
-    return f"{s['welcome_text']}\n\n— {s['shop_name']}"
+    return f"{s['welcome_text']}\n\n🗓 Subscription: {left} day(s) left\n\n— {s['shop_name']}"
 
 
 # ===================== CLEAN SEND =====================
