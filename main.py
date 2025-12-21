@@ -1034,12 +1034,6 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-if data.startswith("getfiles:"):
-    pid = int(data.split(":")[1])
-    p = get_product(shop_id, pid)
-    if not p:
-        return await q.answer("Not found", show_alert=True)
-
     link = (p["telegram_link"] or "").strip()
     if not link:
         return await q.answer("No link set.", show_alert=True)
