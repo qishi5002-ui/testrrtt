@@ -842,6 +842,12 @@ def kb_home(shop_id: int, uid: int) -> InlineKeyboardMarkup:
     ensure_shop_user(shop_id, uid)
     res_on = reseller_logged_in(shop_id, uid)
 
+def kb_open_files(link: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 Get Files", url=link)],
+        [InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
+    ])
+
     grid = [
         [InlineKeyboardButton("🛍️ Products", callback_data="home:products"),
          InlineKeyboardButton("💰 Wallet", callback_data="home:wallet")],
@@ -853,12 +859,6 @@ def kb_home(shop_id: int, uid: int) -> InlineKeyboardMarkup:
 
     if res_on:
         grid.insert(0, [InlineKeyboardButton("🧑‍💻 Reseller: ON (Logout)", callback_data="res:logout")])
-
-    def kb_open_files(link: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📥 Get Files", url=link)],
-        [InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
-    ])
 
     # Owner panel
     if is_shop_owner(shop_id, uid):
