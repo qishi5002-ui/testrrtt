@@ -2,6 +2,7 @@ import os
 import sqlite3
 import datetime
 import hashlib
+import time
 from typing import Optional, List
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -29,14 +30,17 @@ HOME_TEXT = (
 
 DEPOSIT_PRESETS = [500, 1000, 2000, 5000]  # cents
 PAGE_SIZE = 10
+INVITE_EXPIRE_MINUTES = 10  # link expiry when user presses "Get Files"
 
 
 # ===================== HELPERS =====================
 def now_iso() -> str:
     return datetime.datetime.utcnow().isoformat(timespec="seconds")
 
+
 def money(cents: int) -> str:
     return f"{cents/100:.2f} {CURRENCY}"
+
 
 def to_cents(s: str) -> Optional[int]:
     try:
@@ -47,14 +51,17 @@ def to_cents(s: str) -> Optional[int]:
     except Exception:
         return None
 
+
 def sha256(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
 
 def is_admin(uid: int) -> bool:
     return uid == ADMIN_ID
 
+
 def rows2(btns: List[InlineKeyboardButton], per_row: int = 2):
-    return [btns[i:i+per_row] for i in range(0, len(btns), per_row)]
+    return [btns[i:i + per_row] for i in range(0, len(btns), per_row)]
 
 
 # ===================== DB =====================
@@ -62,6 +69,7 @@ def db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
 
 def init_db():
     with db() as conn:
@@ -92,7 +100,7 @@ def init_db():
             name TEXT NOT NULL,
             user_price_cents INTEGER NOT NULL,
             reseller_price_cents INTEGER NOT NULL,
-            channel_link TEXT,
+            group_id INTEGER,               -- ✅ private group id for files
             is_active INTEGER NOT NULL DEFAULT 1
         )
         """)
@@ -129,6 +137,19 @@ def init_db():
             created_at TEXT NOT NULL
         )
         """)
+        # ✅ purchase history
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS purchases(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            product_id INTEGER NOT NULL,
+            product_name TEXT NOT NULL,
+            price_cents INTEGER NOT NULL,
+            key_text TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """)
+
 
 def upsert_user(u):
     uname = (u.username or "").lower() if u.username else None
@@ -145,45 +166,56 @@ def upsert_user(u):
                 VALUES(?,?,?,?,0,0,NULL,?,?)
             """, (u.id, uname, u.first_name, u.last_name, now_iso(), now_iso()))
 
+
 def get_user(uid: int):
     with db() as conn:
         return conn.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
+
 
 def get_last_bot_msg_id(uid: int) -> Optional[int]:
     with db() as conn:
         r = conn.execute("SELECT last_bot_msg_id FROM users WHERE user_id=?", (uid,)).fetchone()
         return int(r["last_bot_msg_id"]) if r and r["last_bot_msg_id"] else None
 
+
 def set_last_bot_msg_id(uid: int, msg_id: Optional[int]):
     with db() as conn:
         conn.execute("UPDATE users SET last_bot_msg_id=? WHERE user_id=?", (msg_id, uid))
+
 
 def get_balance(uid: int) -> int:
     with db() as conn:
         return conn.execute("SELECT balance_cents FROM users WHERE user_id=?", (uid,)).fetchone()["balance_cents"]
 
+
 def add_balance(uid: int, delta: int):
     with db() as conn:
         conn.execute("UPDATE users SET balance_cents=balance_cents+? WHERE user_id=?", (delta, uid))
+
 
 def set_balance(uid: int, new_bal: int):
     with db() as conn:
         conn.execute("UPDATE users SET balance_cents=? WHERE user_id=?", (new_bal, uid))
 
+
 def can_deduct(uid: int, amt: int) -> bool:
     return get_balance(uid) >= amt
+
 
 def deduct(uid: int, amt: int):
     with db() as conn:
         conn.execute("UPDATE users SET balance_cents=balance_cents-? WHERE user_id=?", (amt, uid))
 
+
 def set_reseller_logged(uid: int, flag: bool):
     with db() as conn:
         conn.execute("UPDATE users SET reseller_logged_in=? WHERE user_id=?", (1 if flag else 0, uid))
 
+
 def total_users() -> int:
     with db() as conn:
         return conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+
 
 def list_users(limit: int, offset: int):
     with db() as conn:
@@ -194,6 +226,7 @@ def list_users(limit: int, offset: int):
             LIMIT ? OFFSET ?
         """, (limit, offset)).fetchall()
 
+
 # ---- categories/products/keys ----
 def list_categories(active_only=True):
     with db() as conn:
@@ -201,24 +234,30 @@ def list_categories(active_only=True):
             return conn.execute("SELECT * FROM categories WHERE is_active=1 ORDER BY id ASC").fetchall()
         return conn.execute("SELECT * FROM categories ORDER BY id ASC").fetchall()
 
+
 def add_category(name: str):
     name = name.strip()
-    if not name: return
+    if not name:
+        return
     with db() as conn:
         conn.execute("INSERT INTO categories(name,is_active) VALUES(?,1)", (name,))
+
 
 def toggle_category(cat_id: int):
     with db() as conn:
         r = conn.execute("SELECT is_active FROM categories WHERE id=?", (cat_id,)).fetchone()
-        if not r: return
+        if not r:
+            return
         conn.execute("UPDATE categories SET is_active=? WHERE id=?", (0 if r["is_active"] else 1, cat_id))
 
-def add_product(cat_id: int, name: str, up: int, rp: int, channel: str):
+
+def add_product(cat_id: int, name: str, up: int, rp: int):
     with db() as conn:
         conn.execute("""
-            INSERT INTO products(category_id,name,user_price_cents,reseller_price_cents,channel_link,is_active)
-            VALUES(?,?,?,?,?,1)
-        """, (cat_id, name.strip(), up, rp, channel.strip() if channel and channel != "-" else None))
+            INSERT INTO products(category_id,name,user_price_cents,reseller_price_cents,group_id,is_active)
+            VALUES(?,?,?,?,NULL,1)
+        """, (cat_id, name.strip(), up, rp))
+
 
 def list_products_by_cat(cat_id: int):
     with db() as conn:
@@ -230,6 +269,7 @@ def list_products_by_cat(cat_id: int):
             ORDER BY p.id ASC
         """, (cat_id,)).fetchall()
 
+
 def list_products_all():
     with db() as conn:
         return conn.execute("""
@@ -239,6 +279,7 @@ def list_products_all():
             ORDER BY p.id DESC
         """).fetchall()
 
+
 def get_product(pid: int):
     with db() as conn:
         return conn.execute("""
@@ -247,26 +288,36 @@ def get_product(pid: int):
             FROM products p WHERE p.id=?
         """, (pid,)).fetchone()
 
+
 def toggle_product(pid: int):
     with db() as conn:
         r = conn.execute("SELECT is_active FROM products WHERE id=?", (pid,)).fetchone()
-        if not r: return
+        if not r:
+            return
         conn.execute("UPDATE products SET is_active=? WHERE id=?", (0 if r["is_active"] else 1, pid))
 
-def update_product_channel(pid: int, link: str):
+
+def update_product_group(pid: int, group_id: Optional[int]):
     with db() as conn:
-        conn.execute("UPDATE products SET channel_link=? WHERE id=?", (link.strip() if link and link != "-" else None, pid))
+        conn.execute("UPDATE products SET group_id=? WHERE id=?", (group_id, pid))
+
 
 def update_product_prices(pid: int, up: int, rp: int):
     with db() as conn:
         conn.execute("UPDATE products SET user_price_cents=?, reseller_price_cents=? WHERE id=?", (up, rp, pid))
 
+
 def add_keys(pid: int, keys: List[str]) -> int:
     keys = [k.strip() for k in keys if k.strip()]
-    if not keys: return 0
+    if not keys:
+        return 0
     with db() as conn:
-        conn.executemany("INSERT INTO keys(product_id,key_text,is_used) VALUES(?,?,0)", [(pid, k) for k in keys])
+        conn.executemany(
+            "INSERT INTO keys(product_id,key_text,is_used) VALUES(?,?,0)",
+            [(pid, k) for k in keys]
+        )
     return len(keys)
+
 
 def take_key(pid: int, buyer: int) -> Optional[str]:
     with db() as conn:
@@ -277,8 +328,40 @@ def take_key(pid: int, buyer: int) -> Optional[str]:
         """, (pid,)).fetchone()
         if not r:
             return None
-        conn.execute("UPDATE keys SET is_used=1, used_by=?, used_at=? WHERE id=?", (buyer, now_iso(), r["id"]))
+        conn.execute(
+            "UPDATE keys SET is_used=1, used_by=?, used_at=? WHERE id=?",
+            (buyer, now_iso(), r["id"])
+        )
         return r["key_text"]
+
+
+# ---- purchases/history ----
+def add_purchase(uid: int, pid: int, pname: str, price_cents: int, key_text: str):
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO purchases(user_id,product_id,product_name,price_cents,key_text,created_at)
+            VALUES(?,?,?,?,?,?)
+        """, (uid, pid, pname, price_cents, key_text, now_iso()))
+
+
+def list_purchases(uid: int, limit: int = 10):
+    with db() as conn:
+        return conn.execute("""
+            SELECT id, product_id, product_name, price_cents, key_text, created_at
+            FROM purchases
+            WHERE user_id=?
+            ORDER BY id DESC
+            LIMIT ?
+        """, (uid, limit)).fetchall()
+
+
+def get_purchase(uid: int, purchase_id: int):
+    with db() as conn:
+        return conn.execute("""
+            SELECT * FROM purchases
+            WHERE id=? AND user_id=?
+        """, (purchase_id, uid)).fetchone()
+
 
 # ---- deposits ----
 def create_deposit(uid: int, amt: int, file_id: str, caption: str) -> int:
@@ -289,6 +372,7 @@ def create_deposit(uid: int, amt: int, file_id: str, caption: str) -> int:
         """, (uid, amt, file_id, caption, now_iso()))
         return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
 
+
 def list_pending_deposits(limit: int, offset: int):
     with db() as conn:
         return conn.execute("""
@@ -296,9 +380,11 @@ def list_pending_deposits(limit: int, offset: int):
             ORDER BY id DESC LIMIT ? OFFSET ?
         """, (limit, offset)).fetchall()
 
+
 def get_deposit(dep_id: int):
     with db() as conn:
         return conn.execute("SELECT * FROM deposits WHERE id=?", (dep_id,)).fetchone()
+
 
 def set_deposit_status(dep_id: int, status: str, reviewer: int):
     with db() as conn:
@@ -307,14 +393,20 @@ def set_deposit_status(dep_id: int, status: str, reviewer: int):
             WHERE id=? AND status='PENDING'
         """, (status, now_iso(), reviewer, dep_id))
 
+
 # ---- resellers ----
 def reseller_by_login(login: str):
     with db() as conn:
-        return conn.execute("SELECT * FROM resellers WHERE login_username=?", (login.lower().strip(),)).fetchone()
+        return conn.execute(
+            "SELECT * FROM resellers WHERE login_username=?",
+            (login.lower().strip(),)
+        ).fetchone()
+
 
 def reseller_by_uid(uid: int):
     with db() as conn:
         return conn.execute("SELECT * FROM resellers WHERE user_id=?", (uid,)).fetchone()
+
 
 def list_resellers(limit=20, offset=0):
     with db() as conn:
@@ -324,6 +416,7 @@ def list_resellers(limit=20, offset=0):
             ORDER BY r.created_at DESC
             LIMIT ? OFFSET ?
         """, (limit, offset)).fetchall()
+
 
 def add_reseller_by_tg_username(tg_username: str, login: str, password: str) -> (bool, str):
     tg = tg_username.strip().lstrip("@").lower()
@@ -341,29 +434,30 @@ def add_reseller_by_tg_username(tg_username: str, login: str, password: str) -> 
         """, (uid, tg, login, sha256(password), now_iso()))
     return True, "Reseller added."
 
+
 def toggle_reseller(uid: int):
     with db() as conn:
         r = conn.execute("SELECT is_active FROM resellers WHERE user_id=?", (uid,)).fetchone()
-        if not r: return
+        if not r:
+            return
         conn.execute("UPDATE resellers SET is_active=? WHERE user_id=?", (0 if r["is_active"] else 1, uid))
+
 
 def set_reseller_password(uid: int, pw: str):
     with db() as conn:
         conn.execute("UPDATE resellers SET password_hash=? WHERE user_id=?", (sha256(pw), uid))
 
 
-# ===================== CLEAN SEND (delete last bot msg) =====================
+# ===================== CLEAN SEND =====================
 async def send_clean(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None):
     uid = update.effective_user.id
     chat_id = update.effective_chat.id
-
     last_id = get_last_bot_msg_id(uid)
     if last_id:
         try:
             await ctx.bot.delete_message(chat_id=chat_id, message_id=last_id)
         except Exception:
             pass
-
     msg = await update.message.reply_text(text, reply_markup=reply_markup)
     set_last_bot_msg_id(uid, msg.message_id)
 
@@ -372,12 +466,13 @@ async def send_clean(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str, 
 def kb_home(uid: int) -> InlineKeyboardMarkup:
     u = get_user(uid)
     reseller_logged = bool(u and u["reseller_logged_in"])
-
     rows = [
         [InlineKeyboardButton("🛍️ Products", callback_data="home:products"),
          InlineKeyboardButton("💰 Wallet", callback_data="home:wallet")],
-        [InlineKeyboardButton("📩 Support", callback_data="home:support"),
-         InlineKeyboardButton("🔐 Reseller Login", callback_data="res:login")],
+        [InlineKeyboardButton("📜 History", callback_data="home:history"),
+         InlineKeyboardButton("📩 Support", callback_data="home:support")],
+        [InlineKeyboardButton("🔐 Reseller Login", callback_data="res:login"),
+         InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")],
     ]
     if reseller_logged:
         rows.insert(0, [InlineKeyboardButton("🧑‍💻 Reseller: ON (Logout)", callback_data="res:logout")])
@@ -385,8 +480,10 @@ def kb_home(uid: int) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton("🛠️ Admin Panel", callback_data="admin:menu")])
     return InlineKeyboardMarkup(rows)
 
+
 def kb_mainmenu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]])
+
 
 def kb_wallet() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -394,12 +491,14 @@ def kb_wallet() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
     ])
 
+
 def kb_deposit_amounts() -> InlineKeyboardMarkup:
     btns = [InlineKeyboardButton(f"💵 {money(a)}", callback_data=f"dep:amt:{a}") for a in DEPOSIT_PRESETS]
     kb = rows2(btns, 2)
     kb.append([InlineKeyboardButton("✍️ Custom Amount", callback_data="dep:custom"),
                InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")])
     return InlineKeyboardMarkup(kb)
+
 
 def kb_admin_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -421,6 +520,7 @@ def support_header(u) -> str:
     name = f"{u.first_name or ''} {u.last_name or ''}".strip()
     return f"👤 {name} {uname}\n🆔 Chat ID: {u.id}\n\n"
 
+
 async def forward_support(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == ADMIN_ID:
         return
@@ -430,6 +530,7 @@ async def forward_support(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
     await ctx.bot.send_message(chat_id=ADMIN_ID, text=support_header(update.effective_user) + "💬 Message:\n" + text)
+
 
 async def admin_reply_by_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -478,6 +579,65 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "home:support":
         ctx.user_data.clear()
         return await q.edit_message_text("📩 Support\n\nType your message. Admin will reply.", reply_markup=kb_mainmenu())
+
+    if data == "home:history":
+        rows = list_purchases(uid, limit=10)
+        if not rows:
+            return await q.edit_message_text("📜 History\n\nNo purchases yet.", reply_markup=kb_mainmenu())
+
+        lines = ["📜 History (last 10)\n"]
+        btns = []
+        for r in rows:
+            lines.append(f"• #{r['id']} — {r['product_name']} — {money(r['price_cents'])}")
+            btns.append(InlineKeyboardButton(f"Get Files #{r['id']}", callback_data=f"hist:get:{r['id']}"))
+
+        kb = rows2(btns, 2)
+        kb.append([InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")])
+
+        return await q.edit_message_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(kb))
+
+    if data.startswith("hist:get:"):
+        purchase_id = int(data.split(":")[-1])
+        pur = get_purchase(uid, purchase_id)
+        if not pur:
+            return await q.answer("Not found", show_alert=True)
+
+        p = get_product(int(pur["product_id"]))
+        if not p or not p["group_id"]:
+            return await q.answer("Files group not set for this product.", show_alert=True)
+
+        # generate fresh unique invite link
+        expire_date = int(time.time()) + (INVITE_EXPIRE_MINUTES * 60)
+        try:
+            invite = await ctx.bot.create_chat_invite_link(
+                chat_id=int(p["group_id"]),
+                member_limit=1,
+                expire_date=expire_date
+            )
+            join_url = invite.invite_link
+        except Exception:
+            return await q.answer("Bot cannot create invite link. Make bot admin + Invite Users permission.", show_alert=True)
+
+        # delete the history message (so it disappears)
+        try:
+            await q.message.delete()
+        except Exception:
+            # if cannot delete, at least remove buttons
+            try:
+                await q.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+
+        # send private join button + key
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔒 Get Files (Join Group)", url=join_url)],
+            [InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
+        ])
+        return await ctx.bot.send_message(
+            chat_id=uid,
+            text=f"✅ Here is your access for order #{purchase_id}.\n\n🔑 Key:\n{pur['key_text']}\n\nTap the button to join the private group:",
+            reply_markup=kb
+        )
 
     if data == "home:products":
         cats = list_categories(True)
@@ -535,9 +695,13 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return await q.answer("Out of stock", show_alert=True)
 
         deduct(uid, price)
-        channel = p["channel_link"] or "(No channel link set)"
+        add_purchase(uid, pid, p["name"], price, key)
+
+        # do NOT show group link here. user gets it in History → Get Files.
         return await q.edit_message_text(
-            f"✅ Purchase Successful!\n\n🔑 Key:\n{key}\n\n🔗 Channel:\n{channel}",
+            "✅ Purchase Successful!\n\n"
+            f"🔑 Key:\n{key}\n\n"
+            "📜 Go to History → Get Files to receive a fresh private link.",
             reply_markup=kb_mainmenu()
         )
 
@@ -592,13 +756,6 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             btns.append(InlineKeyboardButton(title, callback_data=f"admin:user:{r['user_id']}"))
 
         kb = rows2(btns, 2)
-        nav = []
-        if page > 0:
-            nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"admin:users:{page-1}"))
-        if len(rows) == PAGE_SIZE:
-            nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"admin:users:{page+1}"))
-        if nav:
-            kb.append(nav)
         kb.append([InlineKeyboardButton("⬅️ Back", callback_data="admin:menu"),
                    InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")])
         return await q.edit_message_text("👥 Users (tap one):", reply_markup=InlineKeyboardMarkup(kb))
@@ -737,6 +894,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         prods = list_products_all()
         if not prods:
             return await q.edit_message_text("No products yet.", reply_markup=kb_admin_menu())
+
         btns = [InlineKeyboardButton(f"#{p['id']} {p['name']}", callback_data=f"admin:prod:{p['id']}") for p in prods[:40]]
         kb = rows2(btns, 2)
         kb.append([InlineKeyboardButton("⬅️ Back", callback_data="admin:products"),
@@ -752,13 +910,13 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"📦 Product #{pid}\n{p['name']}\n"
             f"User:{money(p['user_price_cents'])}  Reseller:{money(p['reseller_price_cents'])}\n"
             f"Stock:{p['stock']}\n"
-            f"Channel:{p['channel_link'] or '-'}\n"
+            f"Group ID:{p['group_id'] or '-'}\n"
             f"Active:{'YES' if p['is_active'] else 'NO'}"
         )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅/❌ Toggle", callback_data=f"admin:prodtog:{pid}"),
              InlineKeyboardButton("💲 Prices", callback_data=f"admin:prodprice:{pid}")],
-            [InlineKeyboardButton("🔗 Channel", callback_data=f"admin:prodch:{pid}"),
+            [InlineKeyboardButton("👥 Set Group ID", callback_data=f"admin:prodgroup:{pid}"),
              InlineKeyboardButton("⬅️ Back", callback_data="admin:prodlist")],
         ])
         return await q.edit_message_text(text, reply_markup=kb)
@@ -767,10 +925,13 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         toggle_product(int(data.split(":")[-1]))
         return await q.edit_message_text("✅ Updated.", reply_markup=kb_admin_menu())
 
-    if data.startswith("admin:prodch:"):
-        ctx.user_data["flow"] = "prod_set_channel"
+    if data.startswith("admin:prodgroup:"):
+        ctx.user_data["flow"] = "prod_set_group"
         ctx.user_data["target_product"] = int(data.split(":")[-1])
-        return await q.edit_message_text("Type channel link (or - to clear):", reply_markup=kb_admin_menu())
+        return await q.edit_message_text(
+            "Send GROUP_ID for files access (example: -1001234567890)\nSend - to clear.",
+            reply_markup=kb_admin_menu()
+        )
 
     if data.startswith("admin:prodprice:"):
         ctx.user_data["flow"] = "prod_set_prices"
@@ -836,7 +997,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return
 
 
-# ===================== TEXT (THE ONLY TYPING HANDLER) =====================
+# ===================== TEXT (ONLY typing handler) =====================
 async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     upsert_user(update.effective_user)
     uid = update.effective_user.id
@@ -871,7 +1032,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["dep_amount"] = amt
         return await send_clean(update, ctx, f"✅ Amount set: {money(amt)}\nNow send screenshot (photo).", reply_markup=kb_mainmenu())
 
-    # ADMIN FLOWS (typing always handled here)
+    # Admin typing flows
     if is_admin(uid) and flow:
         if flow == "admin_add_cat":
             add_category(text)
@@ -902,6 +1063,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 ctx.user_data.clear()
                 return await send_clean(update, ctx, "Add a category first.", reply_markup=kb_admin_menu())
 
+            # pick category via buttons
             ctx.user_data["flow"] = "prod_pick_cat"
             btns = [InlineKeyboardButton(c["name"], callback_data=f"admin:pickcat:{c['id']}") for c in cats]
             kb = rows2(btns, 2)
@@ -909,37 +1071,27 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Pick category:", reply_markup=InlineKeyboardMarkup(kb))
             return
 
-        if flow == "prod_channel":
-            link = text
-            if link == "-":
-                link = ""
-
-            info = ctx.user_data.get("new_prod", {})
-            cat_id = int(info.get("cat_id", 0))
-            name = info.get("name", "")
-            up = int(info.get("up", 0))
-            rp = int(info.get("rp", 0))
-
-            if not cat_id or not name or up <= 0 or rp <= 0:
-                ctx.user_data.clear()
-                return await send_clean(update, ctx, "❌ Add product failed. Try again.", reply_markup=kb_admin_menu())
-
-            add_product(cat_id, name, up, rp, link)
-            ctx.user_data.clear()
-            return await send_clean(update, ctx, "✅ Product added.", reply_markup=kb_admin_menu())
-
-        if flow == "prod_set_channel":
+        if flow == "prod_set_group":
             pid = int(ctx.user_data.get("target_product", 0))
-            update_product_channel(pid, text)
+            if text.strip() == "-":
+                update_product_group(pid, None)
+                ctx.user_data.clear()
+                return await send_clean(update, ctx, "✅ Group cleared.", reply_markup=kb_admin_menu())
+            try:
+                gid = int(text.strip())
+            except Exception:
+                return await send_clean(update, ctx, "Send a valid GROUP_ID like -1001234567890 (or - to clear).", reply_markup=kb_admin_menu())
+            update_product_group(pid, gid)
             ctx.user_data.clear()
-            return await send_clean(update, ctx, "✅ Channel updated.", reply_markup=kb_admin_menu())
+            return await send_clean(update, ctx, "✅ Group ID saved.", reply_markup=kb_admin_menu())
 
         if flow == "prod_set_prices":
             pid = int(ctx.user_data.get("target_product", 0))
             if "," not in text:
                 return await send_clean(update, ctx, "Use: USER_PRICE,RESELLER_PRICE (example 10,7)", reply_markup=kb_admin_menu())
             a, b = [x.strip() for x in text.split(",", 1)]
-            up = to_cents(a); rp = to_cents(b)
+            up = to_cents(a)
+            rp = to_cents(b)
             if up is None or rp is None:
                 return await send_clean(update, ctx, "Invalid prices.", reply_markup=kb_admin_menu())
             update_product_prices(pid, up, rp)
@@ -990,7 +1142,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return await forward_support(update, ctx)
 
 
-# ===================== PICK CATEGORY CALLBACK =====================
+# ===================== PICK CATEGORY CALLBACK (add product) =====================
 async def on_pick_cat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -998,10 +1150,19 @@ async def on_pick_cat(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if ctx.user_data.get("flow") != "prod_pick_cat":
         return
+
     cat_id = int((q.data or "").split(":")[-1])
-    ctx.user_data["new_prod"]["cat_id"] = cat_id
-    ctx.user_data["flow"] = "prod_channel"
-    return await q.edit_message_text("Type channel link (or - to skip):", reply_markup=kb_admin_menu())
+    info = ctx.user_data.get("new_prod", {})
+    name = info.get("name", "")
+    up = int(info.get("up", 0))
+    rp = int(info.get("rp", 0))
+    if not name or up <= 0 or rp <= 0:
+        ctx.user_data.clear()
+        return await q.edit_message_text("❌ Add product failed. Try again.", reply_markup=kb_admin_menu())
+
+    add_product(cat_id, name, up, rp)
+    ctx.user_data.clear()
+    return await q.edit_message_text("✅ Product added. Now set Group ID in Products → List Products.", reply_markup=kb_admin_menu())
 
 
 # ===================== PHOTO (DEPOSIT) =====================
@@ -1036,6 +1197,7 @@ async def on_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def post_init(app):
     init_db()
 
+
 def main():
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN missing")
@@ -1058,10 +1220,11 @@ def main():
     # admin reply only when replying to forwarded support message
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & filters.User(ADMIN_ID) & filters.REPLY, admin_reply_by_reply))
 
-    # ✅ THE ONLY typing handler (this is why it works)
+    # ONLY typing handler
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, on_text))
 
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
