@@ -998,7 +998,7 @@ if data.startswith("getfiles:"):
     return
 
     # Home menu
-    if data == "home:menu":
+if data == "home:menu":
     ctx.user_data["flow"] = None
 
     # HARD RESET – cancel EVERYTHING
