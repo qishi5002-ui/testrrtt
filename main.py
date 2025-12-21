@@ -970,15 +970,29 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     # Switch shop
-if data.startswith("getfiles:"):
-    pid = int(data.split(":")[1])
-    p = get_product(shop_id, pid)
-    if not p:
-        return await q.answer("Not found", show_alert=True)
+    if data.startswith("getfiles:"):
+        pid = int(data.split(":")[1])
+        p = get_product(shop_id, pid)
+        if not p:
+            return await q.answer("Not found", show_alert=True)
 
-    link = (p["telegram_link"] or "").strip()
-    if not link:
-        return await q.answer("No link set.", show_alert=True)
+        link = (p["telegram_link"] or "").strip()
+        if not link:
+            return await q.answer("No link set.", show_alert=True)
+
+        try:
+            await ctx.bot.delete_message(
+                chat_id=q.message.chat_id,
+                message_id=q.message.message_id
+            )
+        except Exception:
+            pass
+
+        await ctx.bot.send_message(
+            chat_id=q.message.chat_id,
+            text=f"📥 Telegram Link:\n{link}"
+        )
+        return
 
     # delete old bot message
     try:
@@ -1000,10 +1014,6 @@ if data.startswith("getfiles:"):
     )
 
     return
-
-    # Home menu
-if data == "home:menu":
-    ctx.user_data["flow"] = None
 
     # HARD RESET – cancel EVERYTHING
     for k in [
