@@ -814,9 +814,8 @@ def shop_home_text(shop_id: int) -> str:
     s = get_shop(shop_id)
 
     if s["panel_until"] and is_panel_active(shop_id):
-    left = days_left(s["panel_until"])
-    return f"{s['welcome_text']}\n\n🗓 Subscription: {left} day(s) left\n\n— {s['shop_name']}"
-
+        left = days_left(s["panel_until"])
+        return f"{s['welcome_text']}\n\n🗓 Subscription: {left} day(s) left\n\n— {s['shop_name']}"
 
 # ===================== CLEAN SEND =====================
 async def send_clean_text(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, uid: int, text: str, reply_markup=None, parse_mode=None):
