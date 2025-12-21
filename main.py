@@ -20,20 +20,19 @@ from telegram.ext import (
 
 # ===================== ENV =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-SUPER_ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # You
+SUPER_ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # YOU
 DB_PATH = os.getenv("DB_PATH", "rekkoshop.db")
 CURRENCY = os.getenv("CURRENCY", "USD")
 
-# Platform wallet for RekkoShop (shop_id=1) default
+# Wallet address shown for RekkoShop (Shop #1) by default
 PLATFORM_USDT_TRC20_ADDRESS = os.getenv("USDT_TRC20_ADDRESS", "").strip()
 
-# Subscription price for Get Own Panel
-PANEL_PRICE_CENTS = 1000  # $10
+# "Get Own Panel" subscription
+PANEL_PRICE_CENTS = 1000  # $10.00
 PANEL_DAYS = 30
 
-PAGE_SIZE = 8
+PAGE_SIZE = 8  # list paging
 
-# Platform branding
 DEFAULT_MAIN_SHOP_NAME = "RekkoShop"
 DEFAULT_MAIN_WELCOME = "Welcome To RekkoShop , Receive your keys instantly here"
 DEFAULT_BRAND = "Bot created by @RekkoOwn"
@@ -70,7 +69,7 @@ def is_super_admin(uid: int) -> bool:
 def safe_username(u) -> Optional[str]:
     return (u.username or "").lower() if u.username else None
 
-def rows2(btns: List[InlineKeyboardButton], per_row: int = 2):
+def rows(btns: List[InlineKeyboardButton], per_row: int = 2):
     return [btns[i:i+per_row] for i in range(0, len(btns), per_row)]
 
 
@@ -102,12 +101,10 @@ def init_db():
             panel_until TEXT,
             is_suspended INTEGER NOT NULL DEFAULT 0,
             suspended_reason TEXT,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            wallet_address TEXT
         )
         """)
-
-        if not _col_exists(conn, "shops", "wallet_address"):
-            conn.execute("ALTER TABLE shops ADD COLUMN wallet_address TEXT")
 
         conn.execute("""
         CREATE TABLE IF NOT EXISTS users(
@@ -117,16 +114,12 @@ def init_db():
             last_name TEXT,
             last_bot_msg_id INTEGER,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            owner_banned INTEGER NOT NULL DEFAULT 0,
+            owner_restrict_until TEXT,
+            owner_block_reason TEXT
         )
         """)
-
-        if not _col_exists(conn, "users", "owner_banned"):
-            conn.execute("ALTER TABLE users ADD COLUMN owner_banned INTEGER NOT NULL DEFAULT 0")
-        if not _col_exists(conn, "users", "owner_restrict_until"):
-            conn.execute("ALTER TABLE users ADD COLUMN owner_restrict_until TEXT")
-        if not _col_exists(conn, "users", "owner_block_reason"):
-            conn.execute("ALTER TABLE users ADD COLUMN owner_block_reason TEXT")
 
         conn.execute("""
         CREATE TABLE IF NOT EXISTS shop_users(
@@ -224,7 +217,6 @@ def init_db():
         )
         """)
 
-        # Support messages (for owner reply flow convenience)
         conn.execute("""
         CREATE TABLE IF NOT EXISTS support_msgs(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -235,7 +227,7 @@ def init_db():
         )
         """)
 
-        # Ensure main shop exists as id=1
+        # Ensure main shop exists with id=1
         r = conn.execute("SELECT id FROM shops ORDER BY id ASC LIMIT 1").fetchone()
         if not r:
             conn.execute("""
@@ -244,7 +236,7 @@ def init_db():
             """, (SUPER_ADMIN_ID, DEFAULT_MAIN_SHOP_NAME, DEFAULT_MAIN_WELCOME, None, now_iso(),
                   PLATFORM_USDT_TRC20_ADDRESS or None))
 
-        # Ensure main shop wallet set if env exists
+        # Ensure RekkoShop wallet set if env provided
         if PLATFORM_USDT_TRC20_ADDRESS:
             conn.execute("UPDATE shops SET wallet_address=COALESCE(wallet_address, ?) WHERE id=1",
                          (PLATFORM_USDT_TRC20_ADDRESS,))
@@ -349,26 +341,39 @@ def get_balance(shop_id: int, uid: int) -> int:
     r = get_shop_user(shop_id, uid)
     return int(r["balance_cents"])
 
-def add_balance(shop_id: int, uid: int, delta: int):
+def add_balance_delta(shop_id: int, uid: int, delta_cents: int):
     ensure_shop_user(shop_id, uid)
     with db() as conn:
-        conn.execute("UPDATE shop_users SET balance_cents=balance_cents+? WHERE shop_id=? AND user_id=?", (delta, shop_id, uid))
+        conn.execute(
+            "UPDATE shop_users SET balance_cents=balance_cents+? WHERE shop_id=? AND user_id=?",
+            (delta_cents, shop_id, uid)
+        )
+        conn.execute(
+            "UPDATE shop_users SET balance_cents=0 WHERE shop_id=? AND user_id=? AND balance_cents<0",
+            (shop_id, uid)
+        )
 
-def set_balance(shop_id: int, uid: int, new_bal: int):
+def set_balance_absolute(shop_id: int, uid: int, new_bal_cents: int):
+    if new_bal_cents < 0:
+        new_bal_cents = 0
     ensure_shop_user(shop_id, uid)
     with db() as conn:
-        conn.execute("UPDATE shop_users SET balance_cents=? WHERE shop_id=? AND user_id=?", (new_bal, shop_id, uid))
+        conn.execute(
+            "UPDATE shop_users SET balance_cents=? WHERE shop_id=? AND user_id=?",
+            (new_bal_cents, shop_id, uid)
+        )
 
 def can_deduct(shop_id: int, uid: int, amt: int) -> bool:
     return get_balance(shop_id, uid) >= amt
 
 def deduct(shop_id: int, uid: int, amt: int):
-    add_balance(shop_id, uid, -amt)
+    add_balance_delta(shop_id, uid, -amt)
 
 def set_reseller_logged(shop_id: int, uid: int, flag: bool):
     ensure_shop_user(shop_id, uid)
     with db() as conn:
-        conn.execute("UPDATE shop_users SET reseller_logged_in=? WHERE shop_id=? AND user_id=?", (1 if flag else 0, shop_id, uid))
+        conn.execute("UPDATE shop_users SET reseller_logged_in=? WHERE shop_id=? AND user_id=?",
+                     (1 if flag else 0, shop_id, uid))
 
 def reseller_logged_in(shop_id: int, uid: int) -> bool:
     r = get_shop_user(shop_id, uid)
@@ -383,9 +388,14 @@ def get_shop(shop_id: int):
     with db() as conn:
         return conn.execute("SELECT * FROM shops WHERE id=?", (shop_id,)).fetchone()
 
+def is_shop_owner(shop_id: int, uid: int) -> bool:
+    s = get_shop(shop_id)
+    return bool(s) and int(s["owner_id"]) == uid
+
 def set_shop_profile(shop_id: int, name: str, welcome: str):
     with db() as conn:
-        conn.execute("UPDATE shops SET shop_name=?, welcome_text=? WHERE id=?", (name.strip(), welcome.strip(), shop_id))
+        conn.execute("UPDATE shops SET shop_name=?, welcome_text=? WHERE id=?",
+                     (name.strip(), welcome.strip(), shop_id))
 
 def set_shop_panel_until(shop_id: int, until_iso: Optional[str]):
     with db() as conn:
@@ -404,6 +414,19 @@ def shop_is_suspended(shop_id: int) -> Tuple[bool, Optional[str]]:
         return True, "Shop not found"
     return (bool(s["is_suspended"]), s["suspended_reason"])
 
+def get_shop_wallet(shop_id: int) -> Optional[str]:
+    with db() as conn:
+        r = conn.execute("SELECT wallet_address FROM shops WHERE id=?", (shop_id,)).fetchone()
+        if not r:
+            return None
+        v = r["wallet_address"]
+        return v.strip() if v else None
+
+def set_shop_wallet(shop_id: int, address: Optional[str]):
+    addr = address.strip() if address else None
+    with db() as conn:
+        conn.execute("UPDATE shops SET wallet_address=? WHERE id=?", (addr, shop_id))
+
 def get_shop_by_owner(owner_id: int) -> Optional[int]:
     with db() as conn:
         r = conn.execute("SELECT id FROM shops WHERE owner_id=? ORDER BY id DESC LIMIT 1", (owner_id,)).fetchone()
@@ -419,10 +442,6 @@ def create_shop_for_owner(owner_id: int) -> int:
         VALUES(?,?,?,?,0,NULL,?,NULL)
         """, (owner_id, f"{owner_id}'s Shop", "Welcome! Customize your store in the Owner Panel.", None, now_iso()))
         return conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
-
-def is_shop_owner(shop_id: int, uid: int) -> bool:
-    s = get_shop(shop_id)
-    return bool(s) and int(s["owner_id"]) == uid
 
 def is_panel_active(shop_id: int) -> bool:
     s = get_shop(shop_id)
@@ -446,7 +465,6 @@ def renew_panel_if_needed(shop_id: int):
         return
 
     owner_id = int(s["owner_id"])
-    # Renewal uses OWNER BALANCE in THEIR SHOP
     ensure_shop_user(shop_id, owner_id)
     if can_deduct(shop_id, owner_id, PANEL_PRICE_CENTS):
         deduct(shop_id, owner_id, PANEL_PRICE_CENTS)
@@ -476,20 +494,6 @@ def list_shops(limit: int, offset: int):
         ORDER BY id DESC
         LIMIT ? OFFSET ?
         """, (limit, offset)).fetchall()
-
-# --- Per-shop wallet address ---
-def get_shop_wallet(shop_id: int) -> Optional[str]:
-    with db() as conn:
-        r = conn.execute("SELECT wallet_address FROM shops WHERE id=?", (shop_id,)).fetchone()
-        if not r:
-            return None
-        v = r["wallet_address"]
-        return v.strip() if v else None
-
-def set_shop_wallet(shop_id: int, address: Optional[str]):
-    addr = address.strip() if address else None
-    with db() as conn:
-        conn.execute("UPDATE shops SET wallet_address=? WHERE id=?", (addr, shop_id))
 
 
 # ===================== SETTINGS =====================
@@ -521,7 +525,8 @@ def toggle_category(shop_id: int, cat_id: int):
         r = conn.execute("SELECT is_active FROM categories WHERE shop_id=? AND id=?", (shop_id, cat_id)).fetchone()
         if not r:
             return
-        conn.execute("UPDATE categories SET is_active=? WHERE shop_id=? AND id=?", (0 if r["is_active"] else 1, shop_id, cat_id))
+        conn.execute("UPDATE categories SET is_active=? WHERE shop_id=? AND id=?",
+                     (0 if r["is_active"] else 1, shop_id, cat_id))
 
 def list_subcategories(shop_id: int, cat_id: int, active_only=True):
     with db() as conn:
@@ -542,14 +547,16 @@ def add_subcategory(shop_id: int, cat_id: int, name: str):
     if not name:
         return
     with db() as conn:
-        conn.execute("INSERT INTO subcategories(shop_id,category_id,name,is_active) VALUES(?,?,?,1)", (shop_id, cat_id, name))
+        conn.execute("INSERT INTO subcategories(shop_id,category_id,name,is_active) VALUES(?,?,?,1)",
+                     (shop_id, cat_id, name))
 
 def toggle_subcategory(shop_id: int, sub_id: int):
     with db() as conn:
         r = conn.execute("SELECT is_active FROM subcategories WHERE shop_id=? AND id=?", (shop_id, sub_id)).fetchone()
         if not r:
             return
-        conn.execute("UPDATE subcategories SET is_active=? WHERE shop_id=? AND id=?", (0 if r["is_active"] else 1, shop_id, sub_id))
+        conn.execute("UPDATE subcategories SET is_active=? WHERE shop_id=? AND id=?",
+                     (0 if r["is_active"] else 1, shop_id, sub_id))
 
 def add_product(shop_id: int, cat_id: int, sub_id: int, name: str, up: int, rp: int):
     with db() as conn:
@@ -558,14 +565,22 @@ def add_product(shop_id: int, cat_id: int, sub_id: int, name: str, up: int, rp: 
         VALUES(?,?,?,?,?,?,NULL,1)
         """, (shop_id, cat_id, sub_id, name.strip(), up, rp))
 
-def list_products_by_subcat(shop_id: int, sub_id: int):
+def list_products_by_subcat(shop_id: int, sub_id: int, active_only=True):
     with db() as conn:
+        if active_only:
+            return conn.execute("""
+            SELECT p.*,
+              (SELECT COUNT(*) FROM keys k WHERE k.shop_id=p.shop_id AND k.product_id=p.id AND k.is_used=0) AS stock
+            FROM products p
+            WHERE p.shop_id=? AND p.subcategory_id=? AND p.is_active=1
+            ORDER BY p.id ASC
+            """, (shop_id, sub_id)).fetchall()
         return conn.execute("""
-        SELECT p.*,
-          (SELECT COUNT(*) FROM keys k WHERE k.shop_id=p.shop_id AND k.product_id=p.id AND k.is_used=0) AS stock
-        FROM products p
-        WHERE p.shop_id=? AND p.subcategory_id=? AND p.is_active=1
-        ORDER BY p.id ASC
+            SELECT p.*,
+              (SELECT COUNT(*) FROM keys k WHERE k.shop_id=p.shop_id AND k.product_id=p.id AND k.is_used=0) AS stock
+            FROM products p
+            WHERE p.shop_id=? AND p.subcategory_id=?
+            ORDER BY p.id ASC
         """, (shop_id, sub_id)).fetchall()
 
 def get_product(shop_id: int, pid: int):
@@ -582,7 +597,8 @@ def toggle_product(shop_id: int, pid: int):
         r = conn.execute("SELECT is_active FROM products WHERE shop_id=? AND id=?", (shop_id, pid)).fetchone()
         if not r:
             return
-        conn.execute("UPDATE products SET is_active=? WHERE shop_id=? AND id=?", (0 if r["is_active"] else 1, shop_id, pid))
+        conn.execute("UPDATE products SET is_active=? WHERE shop_id=? AND id=?",
+                     (0 if r["is_active"] else 1, shop_id, pid))
 
 def update_product_link(shop_id: int, pid: int, link: Optional[str]):
     with db() as conn:
@@ -725,7 +741,8 @@ def toggle_reseller(shop_id: int, uid: int):
         r = conn.execute("SELECT is_active FROM resellers WHERE shop_id=? AND user_id=?", (shop_id, uid)).fetchone()
         if not r:
             return
-        conn.execute("UPDATE resellers SET is_active=? WHERE shop_id=? AND user_id=?", (0 if r["is_active"] else 1, shop_id, uid))
+        conn.execute("UPDATE resellers SET is_active=? WHERE shop_id=? AND user_id=?",
+                     (0 if r["is_active"] else 1, shop_id, uid))
 
 def list_resellers(shop_id: int, limit: int, offset: int):
     with db() as conn:
@@ -738,7 +755,8 @@ def list_resellers(shop_id: int, limit: int, offset: int):
 
 def set_reseller_password(shop_id: int, uid: int, pw: str):
     with db() as conn:
-        conn.execute("UPDATE resellers SET password_hash=? WHERE shop_id=? AND user_id=?", (sha256(pw), shop_id, uid))
+        conn.execute("UPDATE resellers SET password_hash=? WHERE shop_id=? AND user_id=?",
+                     (sha256(pw), shop_id, uid))
 
 
 # ===================== SUPPORT =====================
@@ -748,6 +766,11 @@ def add_support_msg(shop_id: int, uid: int, text: str):
         INSERT INTO support_msgs(shop_id,user_id,text,created_at)
         VALUES(?,?,?,?)
         """, (shop_id, uid, text.strip(), now_iso()))
+
+def count_shop_users(shop_id: int) -> int:
+    with db() as conn:
+        r = conn.execute("SELECT COUNT(*) AS c FROM shop_users WHERE shop_id=?", (shop_id,)).fetchone()
+        return int(r["c"])
 
 def list_shop_users(shop_id: int, limit: int, offset: int):
     with db() as conn:
@@ -759,11 +782,6 @@ def list_shop_users(shop_id: int, limit: int, offset: int):
         ORDER BY su.user_id ASC
         LIMIT ? OFFSET ?
         """, (shop_id, limit, offset)).fetchall()
-
-def count_shop_users(shop_id: int) -> int:
-    with db() as conn:
-        r = conn.execute("SELECT COUNT(*) AS c FROM shop_users WHERE shop_id=?", (shop_id,)).fetchone()
-        return int(r["c"])
 
 
 # ===================== SHOP CONTEXT =====================
@@ -786,36 +804,37 @@ def shop_home_text(shop_id: int) -> str:
     renew_panel_if_needed(shop_id)
     s = get_shop(shop_id)
 
-    # If panel is active, remove platform branding (owner can customize)
     if s["panel_until"] and is_panel_active(shop_id):
         return f"{s['welcome_text']}\n\n— {s['shop_name']}"
-    # Otherwise show platform branding
     return f"{s['welcome_text']}\n\n{DEFAULT_BRAND}"
 
 
 # ===================== CLEAN SEND =====================
-async def send_clean_text(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, uid: int, text: str, reply_markup=None):
+async def send_clean_text(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, uid: int, text: str, reply_markup=None, parse_mode=None):
     last_id = get_last_bot_msg_id(uid)
     if last_id:
         try:
             await ctx.bot.delete_message(chat_id=chat_id, message_id=last_id)
         except Exception:
             pass
-    msg = await ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+    msg = await ctx.bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup, parse_mode=parse_mode)
     set_last_bot_msg_id(uid, msg.message_id)
 
-async def send_clean(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None):
+async def send_clean(update: Update, ctx: ContextTypes.DEFAULT_TYPE, text: str, reply_markup=None, parse_mode=None):
     uid = update.effective_user.id
     chat_id = update.effective_chat.id
-    await send_clean_text(chat_id, ctx, uid, text, reply_markup=reply_markup)
+    await send_clean_text(chat_id, ctx, uid, text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 
-# ===================== UI =====================
+# ===================== UI HELPERS =====================
+def kb_back_home() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]])
+
 def kb_home(shop_id: int, uid: int) -> InlineKeyboardMarkup:
     ensure_shop_user(shop_id, uid)
-    reseller_on = reseller_logged_in(shop_id, uid)
+    res_on = reseller_logged_in(shop_id, uid)
 
-    btns = [
+    grid = [
         [InlineKeyboardButton("🛍️ Products", callback_data="home:products"),
          InlineKeyboardButton("💰 Wallet", callback_data="home:wallet")],
         [InlineKeyboardButton("📜 History", callback_data="home:history"),
@@ -823,36 +842,33 @@ def kb_home(shop_id: int, uid: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔐 Reseller Login", callback_data="res:login"),
          InlineKeyboardButton("⭐ Get Own Panel", callback_data="panel:info")],
     ]
-    if reseller_on:
-        btns.insert(0, [InlineKeyboardButton("🧑‍💻 Reseller: ON (Logout)", callback_data="res:logout")])
 
-    # Owner Panel rules
+    if res_on:
+        grid.insert(0, [InlineKeyboardButton("🧑‍💻 Reseller: ON (Logout)", callback_data="res:logout")])
+
+    # Owner panel
     if is_shop_owner(shop_id, uid):
         if shop_id == get_main_shop_id() and is_super_admin(uid):
-            btns.append([InlineKeyboardButton("🛠️ Owner Panel", callback_data="own:menu")])
+            grid.append([InlineKeyboardButton("🛠️ Owner Panel", callback_data="own:menu")])
         else:
             renew_panel_if_needed(shop_id)
             if is_panel_active(shop_id):
-                btns.append([InlineKeyboardButton("🛠️ Owner Panel", callback_data="own:menu")])
+                grid.append([InlineKeyboardButton("🛠️ Owner Panel", callback_data="own:menu")])
             else:
-                btns.append([InlineKeyboardButton("🔒 Owner Panel (Get Own Panel Required)", callback_data="panel:info")])
+                grid.append([InlineKeyboardButton("🔒 Owner Panel (Get Own Panel Required)", callback_data="panel:info")])
 
-    # Switcher
+    # Switch shop
     if shop_id != get_main_shop_id():
-        btns.append([InlineKeyboardButton("⬅️ Back to RekkoShop", callback_data="shop:switch:main")])
+        grid.append([InlineKeyboardButton("⬅️ Back to RekkoShop", callback_data="shop:switch:main")])
     else:
         sid = get_shop_by_owner(uid)
         if sid and sid != get_main_shop_id():
-            btns.append([InlineKeyboardButton("🏪 My Shop", callback_data=f"shop:switch:{sid}")])
+            grid.append([InlineKeyboardButton("🏪 My Shop", callback_data=f"shop:switch:{sid}")])
 
-    # Super admin platform
     if shop_id == get_main_shop_id() and is_super_admin(uid):
-        btns.append([InlineKeyboardButton("🧾 Platform", callback_data="sa:menu")])
+        grid.append([InlineKeyboardButton("🧾 Platform", callback_data="sa:menu")])
 
-    return InlineKeyboardMarkup(btns)
-
-def kb_back_home() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]])
+    return InlineKeyboardMarkup(grid)
 
 def kb_wallet() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -863,7 +879,7 @@ def kb_wallet() -> InlineKeyboardMarkup:
 def kb_deposit_amounts() -> InlineKeyboardMarkup:
     presets = [500, 1000, 2000, 5000]
     btns = [InlineKeyboardButton(f"💵 {money(a)}", callback_data=f"dep:amt:{a}") for a in presets]
-    kb = rows2(btns, 2)
+    kb = rows(btns, 2)
     kb.append([InlineKeyboardButton("✍️ Custom Amount", callback_data="dep:custom"),
                InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")])
     return InlineKeyboardMarkup(kb)
@@ -902,7 +918,6 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     upsert_user(update.effective_user)
     uid = update.effective_user.id
 
-    # Keep active_shop but clear flows
     ctx.user_data.setdefault("active_shop_id", get_main_shop_id())
     ctx.user_data["flow"] = None
 
@@ -932,7 +947,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ensure_shop_user(shop_id, uid)
     data = q.data or ""
 
-    # Suspension guard
+    # Suspension guard (allow switching/home)
     suspended, reason = shop_is_suspended(shop_id)
     if suspended and not data.startswith("shop:switch:") and data != "home:menu":
         return await q.edit_message_text(
@@ -957,12 +972,12 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["flow"] = None
         return await q.edit_message_text(shop_home_text(shop_id), reply_markup=kb_home(shop_id, uid))
 
-    # Home
+    # Home menu
     if data == "home:menu":
         ctx.user_data["flow"] = None
         return await q.edit_message_text(shop_home_text(shop_id), reply_markup=kb_home(shop_id, uid))
 
-    # Wallet
+    # Wallet screen
     if data == "home:wallet":
         bal = get_balance(shop_id, uid)
         addr = get_shop_wallet(shop_id)
@@ -970,6 +985,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         txt = f"💰 Wallet\n\nBalance: {money(bal)}\n\nUSDT (TRC-20) Address:\n{addr_txt}"
         return await q.edit_message_text(txt, reply_markup=kb_wallet())
 
+    # Deposit
     if data == "wallet:deposit":
         addr = get_shop_wallet(shop_id)
         if not addr:
@@ -997,7 +1013,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["flow"] = "dep_custom"
         return await q.edit_message_text("✍️ Send amount (example 10 or 10.5):", reply_markup=kb_back_home())
 
-    # Products
+    # Products root
     if data == "home:products":
         return await q.edit_message_text("🛍️ Products", reply_markup=kb_products_root())
 
@@ -1006,7 +1022,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not cats:
             return await q.edit_message_text("No categories yet.", reply_markup=kb_back_home())
         btns = [InlineKeyboardButton(c["name"], callback_data=f"prod:cat:{c['id']}") for c in cats]
-        kb = rows2(btns, 2)
+        kb = rows(btns, 2)
         kb.append([InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")])
         return await q.edit_message_text("📂 Choose a category:", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -1019,30 +1035,28 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                  InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
             ]))
         btns = [InlineKeyboardButton(s["name"], callback_data=f"prod:sub:{s['id']}:{cat_id}") for s in subs]
-        kb = rows2(btns, 2)
+        kb = rows(btns, 2)
         kb.append([InlineKeyboardButton("⬅️ Back", callback_data="prod:cats"),
                    InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")])
         return await q.edit_message_text("🧩 Choose a co-category:", reply_markup=InlineKeyboardMarkup(kb))
 
     if data.startswith("prod:sub:"):
-        # prod:sub:<sub_id>:<cat_id>
         parts = data.split(":")
         sub_id = int(parts[2])
         cat_id = int(parts[3])
-        prods = list_products_by_subcat(shop_id, sub_id)
+        prods = list_products_by_subcat(shop_id, sub_id, active_only=True)
         if not prods:
             return await q.edit_message_text("No products in this co-category.", reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬅️ Back", callback_data=f"prod:cat:{cat_id}"),
                  InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
             ]))
         btns = [InlineKeyboardButton(p["name"], callback_data=f"prod:item:{p['id']}:{sub_id}:{cat_id}") for p in prods]
-        kb = rows2(btns, 2)
+        kb = rows(btns, 2)
         kb.append([InlineKeyboardButton("⬅️ Back", callback_data=f"prod:cat:{cat_id}"),
                    InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")])
         return await q.edit_message_text("📦 Choose a product:", reply_markup=InlineKeyboardMarkup(kb))
 
     if data.startswith("prod:item:"):
-        # prod:item:<pid>:<sub_id>:<cat_id>
         parts = data.split(":")
         pid = int(parts[2])
         sub_id = int(parts[3])
@@ -1063,9 +1077,9 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Your balance: {money(bal)}"
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🛒 Buy", callback_data=f"buy:{pid}:{sub_id}:{cat_id}")],
-            [InlineKeyboardButton("⬅️ Back", callback_data=f"prod:sub:{sub_id}:{cat_id}"),
-             InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
+            [InlineKeyboardButton("🛒 Buy", callback_data=f"buy:{pid}:{sub_id}:{cat_id}"),
+             InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")],
+            [InlineKeyboardButton("⬅️ Back", callback_data=f"prod:sub:{sub_id}:{cat_id}")]
         ])
         return await q.edit_message_text(txt, reply_markup=kb)
 
@@ -1100,8 +1114,8 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         txt = f"✅ Purchase successful!\n\n🔑 Key:\n`{key_text}`"
         if link:
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📥 Get Files", callback_data=f"getfiles:{pid}")],
-                [InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
+                [InlineKeyboardButton("📥 Get Files", callback_data=f"getfiles:{pid}") ,
+                 InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
             ])
             return await q.edit_message_text(txt, reply_markup=kb, parse_mode="Markdown")
         return await q.edit_message_text(txt + "\n\n⚠️ No file link set yet.", reply_markup=kb_back_home(), parse_mode="Markdown")
@@ -1114,7 +1128,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         link = (p["telegram_link"] or "").strip()
         if not link:
             return await q.answer("No link set.", show_alert=True)
-        # delete message after click (your requirement)
+        # delete the old message after click (your requirement)
         try:
             await ctx.bot.delete_message(chat_id=q.message.chat_id, message_id=q.message.message_id)
         except Exception:
@@ -1128,7 +1142,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not purchases:
             return await q.edit_message_text("📜 No purchases yet.", reply_markup=kb_back_home())
         btns = [InlineKeyboardButton(f"#{r['id']} • {r['product_name']}", callback_data=f"hist:view:{r['id']}") for r in purchases]
-        kb = rows2(btns, 1)
+        kb = rows(btns, 1)
         kb.append([InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")])
         return await q.edit_message_text("📜 Your purchases:", reply_markup=InlineKeyboardMarkup(kb))
 
@@ -1144,14 +1158,13 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Date: {r['created_at']}\n\n"
             f"🔑 Key:\n`{r['key_text']}`"
         )
-        # best effort: link comes from current product settings
         p = get_product(shop_id, int(r["product_id"]))
         link = (p["telegram_link"] or "").strip() if p else ""
         if link:
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📥 Get Files", url=link)],
-                [InlineKeyboardButton("⬅️ Back", callback_data="home:history"),
-                 InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
+                [InlineKeyboardButton("📥 Get Files", url=link),
+                 InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="home:history")]
             ])
         else:
             kb = InlineKeyboardMarkup([
@@ -1165,7 +1178,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["flow"] = "support_send"
         return await q.edit_message_text("📩 Support\n\nType your message to the shop owner:", reply_markup=kb_back_home())
 
-    # Reseller
+    # Reseller login/logout
     if data == "res:logout":
         set_reseller_logged(shop_id, uid, False)
         return await q.edit_message_text("✅ Reseller logged out.", reply_markup=kb_home(shop_id, uid))
@@ -1223,8 +1236,6 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "own:menu":
         if not is_shop_owner(shop_id, uid):
             return await q.answer("Not authorized", show_alert=True)
-
-        # for non-main shops, must be active panel
         if shop_id != get_main_shop_id():
             ok, msg = can_be_owner(uid)
             if not ok:
@@ -1232,11 +1243,10 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             renew_panel_if_needed(shop_id)
             if not is_panel_active(shop_id):
                 return await q.answer("Get Own Panel expired. Top up YOUR SHOP wallet to auto-renew.", show_alert=True)
-
         ctx.user_data["flow"] = None
         return await q.edit_message_text("🛠️ Owner Panel", reply_markup=kb_owner_menu(shop_id))
 
-    # Owner: edit store
+    # Owner: Edit store
     if data == "own:editstore":
         if not is_shop_owner(shop_id, uid):
             return await q.answer("Not authorized", show_alert=True)
@@ -1246,7 +1256,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_owner_menu(shop_id)
         )
 
-    # Owner: wallet address edit
+    # Owner: Wallet address
     if data == "own:walletaddr":
         if not is_shop_owner(shop_id, uid):
             return await q.answer("Not authorized", show_alert=True)
@@ -1264,13 +1274,13 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=kb_owner_menu(shop_id)
         )
 
-    # Owner: categories
+    # Owner: Categories
     if data == "own:cats":
         if not is_shop_owner(shop_id, uid):
             return await q.answer("Not authorized", show_alert=True)
         cats = list_categories(shop_id, active_only=False)
         btns = [InlineKeyboardButton(("✅ " if c["is_active"] else "🚫 ") + c["name"], callback_data=f"own:cat_toggle:{c['id']}") for c in cats]
-        kb = rows2(btns, 2)
+        kb = rows(btns, 2)
         kb.append([InlineKeyboardButton("➕ Add Category", callback_data="own:cat_add"),
                    InlineKeyboardButton("⬅️ Back", callback_data="own:menu")])
         return await q.edit_message_text("📂 Categories (tap to enable/disable):", reply_markup=InlineKeyboardMarkup(kb))
@@ -1282,9 +1292,12 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith("own:cat_toggle:"):
         cat_id = int(data.split(":")[-1])
         toggle_category(shop_id, cat_id)
-        return await on_cb(update, ctx)  # refresh
+        return await q.edit_message_text("✅ Updated.", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ Back", callback_data="own:cats"),
+             InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
+        ]))
 
-    # Owner: subcategories
+    # Owner: Co-Categories
     if data == "own:subs":
         if not is_shop_owner(shop_id, uid):
             return await q.answer("Not authorized", show_alert=True)
@@ -1292,15 +1305,15 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not cats:
             return await q.edit_message_text("No categories yet. Add category first.", reply_markup=kb_owner_menu(shop_id))
         btns = [InlineKeyboardButton(c["name"], callback_data=f"own:subs_in:{c['id']}") for c in cats]
-        kb = rows2(btns, 2)
+        kb = rows(btns, 2)
         kb.append([InlineKeyboardButton("⬅️ Back", callback_data="own:menu")])
-        return await q.edit_message_text("🧩 Choose a category to manage co-categories:", reply_markup=InlineKeyboardMarkup(kb))
+        return await q.edit_message_text("🧩 Choose category:", reply_markup=InlineKeyboardMarkup(kb))
 
     if data.startswith("own:subs_in:"):
         cat_id = int(data.split(":")[-1])
         subs = list_subcategories(shop_id, cat_id, active_only=False)
         btns = [InlineKeyboardButton(("✅ " if s["is_active"] else "🚫 ") + s["name"], callback_data=f"own:sub_toggle:{s['id']}:{cat_id}") for s in subs]
-        kb = rows2(btns, 2)
+        kb = rows(btns, 2)
         kb.append([InlineKeyboardButton("➕ Add Co-Category", callback_data=f"own:sub_add:{cat_id}"),
                    InlineKeyboardButton("⬅️ Back", callback_data="own:subs")])
         return await q.edit_message_text("🧩 Co-categories (tap to enable/disable):", reply_markup=InlineKeyboardMarkup(kb))
@@ -1321,7 +1334,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
         ]))
 
-    # Owner: products
+    # Owner: Products
     if data == "own:products":
         if not is_shop_owner(shop_id, uid):
             return await q.answer("Not authorized", show_alert=True)
@@ -1329,9 +1342,9 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not cats:
             return await q.edit_message_text("Add a category first.", reply_markup=kb_owner_menu(shop_id))
         btns = [InlineKeyboardButton(c["name"], callback_data=f"own:prod_cat:{c['id']}") for c in cats]
-        kb = rows2(btns, 2)
+        kb = rows(btns, 2)
         kb.append([InlineKeyboardButton("⬅️ Back", callback_data="own:menu")])
-        return await q.edit_message_text("📦 Choose category to add/manage products:", reply_markup=InlineKeyboardMarkup(kb))
+        return await q.edit_message_text("📦 Choose category:", reply_markup=InlineKeyboardMarkup(kb))
 
     if data.startswith("own:prod_cat:"):
         cat_id = int(data.split(":")[-1])
@@ -1342,7 +1355,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                  InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
             ]))
         btns = [InlineKeyboardButton(s["name"], callback_data=f"own:prod_sub:{s['id']}:{cat_id}") for s in subs]
-        kb = rows2(btns, 2)
+        kb = rows(btns, 2)
         kb.append([InlineKeyboardButton("⬅️ Back", callback_data="own:products"),
                    InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")])
         return await q.edit_message_text("📦 Choose co-category:", reply_markup=InlineKeyboardMarkup(kb))
@@ -1351,10 +1364,10 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parts = data.split(":")
         sub_id = int(parts[2])
         cat_id = int(parts[3])
-
-        prods = list_products_by_subcat(shop_id, sub_id)
-        btns = [InlineKeyboardButton(("✅ " if p["is_active"] else "🚫 ") + p["name"], callback_data=f"own:prod_view:{p['id']}:{sub_id}:{cat_id}") for p in prods]
-        kb = rows2(btns, 2)
+        prods = list_products_by_subcat(shop_id, sub_id, active_only=False)
+        btns = [InlineKeyboardButton((("✅ " if int(p["is_active"])==1 else "🚫 ") + p["name"] + f" (ID {p['id']})"),
+                                    callback_data=f"own:prod_view:{p['id']}:{sub_id}:{cat_id}") for p in prods]
+        kb = rows(btns, 1)
         kb.append([InlineKeyboardButton("➕ Add Product", callback_data=f"own:prod_add:{sub_id}:{cat_id}"),
                    InlineKeyboardButton("⬅️ Back", callback_data=f"own:prod_cat:{cat_id}")])
         return await q.edit_message_text("📦 Products:", reply_markup=InlineKeyboardMarkup(kb))
@@ -1379,18 +1392,22 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         p = get_product(shop_id, pid)
         if not p:
             return await q.answer("Not found", show_alert=True)
+
         txt = (
-            f"📦 {p['name']}\n\n"
+            f"📦 {p['name']} (ID {p['id']})\n\n"
             f"User price: {money(int(p['user_price_cents']))}\n"
             f"Reseller price: {money(int(p['reseller_price_cents']))}\n"
             f"Stock: {int(p['stock'])}\n"
+            f"Active: {'YES' if int(p['is_active'])==1 else 'NO'}\n"
             f"Link: {(p['telegram_link'] or '-').strip()}"
         )
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Toggle Active", callback_data=f"own:prod_toggle:{pid}:{sub_id}:{cat_id}"),
              InlineKeyboardButton("🔗 Edit Link", callback_data=f"own:prod_link:{pid}")],
             [InlineKeyboardButton("💲 Edit Prices", callback_data=f"own:prod_price:{pid}"),
-             InlineKeyboardButton("⬅️ Back", callback_data=f"own:prod_sub:{sub_id}:{cat_id}")],
+             InlineKeyboardButton("🔑 Add Keys", callback_data=f"own:keys_for:{pid}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data=f"own:prod_sub:{sub_id}:{cat_id}"),
+             InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
         ])
         return await q.edit_message_text(txt, reply_markup=kb)
 
@@ -1417,15 +1434,28 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["pid"] = pid
         return await q.edit_message_text("💲 Send format: user_price | reseller_price\nExample: 10 | 8", reply_markup=kb_owner_menu(shop_id))
 
-    # Owner: keys
+    # Owner: Keys (button first)
     if data == "own:keys":
         if not is_shop_owner(shop_id, uid):
             return await q.answer("Not authorized", show_alert=True)
-        ctx.user_data["flow"] = "own_keys_pick_product"
-        return await q.edit_message_text("🔑 Keys\n\nSend product ID to add keys, or go to Products and open a product to see its ID.\n\nTip: easiest: open Products → choose product → (you see product name) then come back and send ID.",
-                                         reply_markup=kb_owner_menu(shop_id))
+        ctx.user_data["flow"] = None
+        return await q.edit_message_text("🔑 Keys\n\nOpen a product → tap “🔑 Add Keys”.", reply_markup=kb_owner_menu(shop_id))
 
-    # Owner: deposits list
+    if data.startswith("own:keys_for:"):
+        if not is_shop_owner(shop_id, uid):
+            return await q.answer("Not authorized", show_alert=True)
+        pid = int(data.split(":")[-1])
+        p = get_product(shop_id, pid)
+        if not p:
+            return await q.answer("Product not found", show_alert=True)
+        ctx.user_data["flow"] = "own_keys_add"
+        ctx.user_data["pid"] = pid
+        return await q.edit_message_text(
+            f"🔑 Add Keys for: {p['name']} (ID {pid})\n\nSend keys (one per line):",
+            reply_markup=kb_owner_menu(shop_id)
+        )
+
+    # Owner: Deposits
     if data.startswith("own:deps:"):
         if not is_shop_owner(shop_id, uid):
             return await q.answer("Not authorized", show_alert=True)
@@ -1433,12 +1463,9 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         deps = list_pending_deposits(shop_id, PAGE_SIZE, page * PAGE_SIZE)
         if not deps:
             return await q.edit_message_text("💳 No pending deposits.", reply_markup=kb_owner_menu(shop_id))
-
-        btns = []
-        for d in deps:
-            btns.append(InlineKeyboardButton(f"#{d['id']} • {d['user_id']} • {money(int(d['amount_cents']))}", callback_data=f"own:dep:{d['id']}:{page}"))
-        kb = rows2(btns, 1)
-
+        btns = [InlineKeyboardButton(f"#{d['id']} • {d['user_id']} • {money(int(d['amount_cents']))}",
+                                     callback_data=f"own:dep:{d['id']}:{page}") for d in deps]
+        kb = rows(btns, 1)
         nav = []
         if page > 0:
             nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"own:deps:{page-1}"))
@@ -1450,7 +1477,6 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await q.edit_message_text("💳 Pending deposits:", reply_markup=InlineKeyboardMarkup(kb))
 
     if data.startswith("own:dep:"):
-        # own:dep:<dep_id>:<page>
         parts = data.split(":")
         dep_id = int(parts[2])
         page = int(parts[3])
@@ -1466,10 +1492,12 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("⬅️ Back", callback_data=f"own:deps:{page}")]
         ])
 
-        caption = f"🏪 Shop #{shop_id}\n💳 Deposit #{dep_id}\nUser: {d['user_id']}\nAmount: {money(int(d['amount_cents']))}\nNote: {d['caption'] or '-'}\nStatus: {d['status']}"
-        # Send photo as a new message (clean) because edit photo is messy
+        caption = (
+            f"🏪 Shop #{shop_id}\n💳 Deposit #{dep_id}\n"
+            f"User: {d['user_id']}\nAmount: {money(int(d['amount_cents']))}\n"
+            f"Note: {d['caption'] or '-'}\nStatus: {d['status']}"
+        )
         await send_clean_text(q.message.chat_id, ctx, uid, caption, reply_markup=kb)
-        # also display the image separately
         await ctx.bot.send_photo(chat_id=q.message.chat_id, photo=d["photo_file_id"])
         return
 
@@ -1482,7 +1510,6 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return await q.answer("Only PENDING deposits can be edited.", show_alert=True)
         ctx.user_data["flow"] = "own_dep_edit_amount"
         ctx.user_data["target_deposit"] = dep_id
-        ctx.user_data["dep_page"] = page
         return await q.edit_message_text(
             f"✏️ Edit Deposit Amount\n\nCurrent: {money(int(d['amount_cents']))}\n\nSend new amount:",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"own:dep:{dep_id}:{page}")]])
@@ -1497,7 +1524,6 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return await q.answer("Only PENDING deposits can be edited.", show_alert=True)
         ctx.user_data["flow"] = "own_dep_edit_note"
         ctx.user_data["target_deposit"] = dep_id
-        ctx.user_data["dep_page"] = page
         return await q.edit_message_text(
             f"📝 Edit Deposit Note\n\nCurrent:\n{d['caption'] or '-'}\n\nSend new note:",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"own:dep:{dep_id}:{page}")]])
@@ -1511,7 +1537,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not d or d["status"] != "PENDING":
             return await q.answer("Already processed.", show_alert=True)
         set_deposit_status(shop_id, dep_id, "APPROVED", uid)
-        add_balance(shop_id, int(d["user_id"]), int(d["amount_cents"]))
+        add_balance_delta(shop_id, int(d["user_id"]), int(d["amount_cents"]))
         return await q.edit_message_text("✅ Deposit approved and balance added.", reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("⬅️ Back", callback_data=f"own:deps:{page}"),
              InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
@@ -1530,21 +1556,22 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
         ]))
 
-    # Owner: users & reply
+    # Owner: Users list + reply + balance edit
     if data.startswith("own:users:"):
         if not is_shop_owner(shop_id, uid):
             return await q.answer("Not authorized", show_alert=True)
         page = int(data.split(":")[-1])
         total = count_shop_users(shop_id)
-        rows = list_shop_users(shop_id, PAGE_SIZE, page * PAGE_SIZE)
-        if not rows:
+        rowsu = list_shop_users(shop_id, PAGE_SIZE, page * PAGE_SIZE)
+        if not rowsu:
             return await q.edit_message_text("No users yet.", reply_markup=kb_owner_menu(shop_id))
 
         btns = []
-        for r in rows:
+        for r in rowsu:
             uname = ("@" + r["username"]) if r["username"] else ""
-            btns.append(InlineKeyboardButton(f"{r['user_id']} {uname}", callback_data=f"own:user:{r['user_id']}:{page}"))
-        kb = rows2(btns, 1)
+            btns.append(InlineKeyboardButton(f"{r['user_id']} {uname} • {money(int(r['balance_cents']))}",
+                                             callback_data=f"own:user:{r['user_id']}:{page}"))
+        kb = rows(btns, 1)
 
         nav = []
         if page > 0:
@@ -1557,19 +1584,62 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await q.edit_message_text(f"👥 Users (Total {total})", reply_markup=InlineKeyboardMarkup(kb))
 
     if data.startswith("own:user:"):
-        # own:user:<user_id>:<page>
+        if not is_shop_owner(shop_id, uid):
+            return await q.answer("Not authorized", show_alert=True)
         parts = data.split(":")
         target_uid = int(parts[2])
         page = int(parts[3])
-        ctx.user_data["flow"] = "own_reply_user"
-        ctx.user_data["reply_to_uid"] = target_uid
-        ctx.user_data["users_page"] = page
-        return await q.edit_message_text(
-            f"💬 Reply to user {target_uid}\n\nType your message now:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"own:users:{page}")]])
-        )
 
-    # Owner: resellers list / add
+        ensure_shop_user(shop_id, target_uid)
+        bal = get_balance(shop_id, target_uid)
+
+        ctx.user_data["selected_user"] = target_uid
+        ctx.user_data["selected_user_page"] = page
+
+        txt = f"👤 User {target_uid}\n\nBalance: {money(bal)}"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💬 Reply", callback_data="own:reply"),
+             InlineKeyboardButton("💰 Edit Balance", callback_data="own:balmenu")],
+            [InlineKeyboardButton("⬅️ Back", callback_data=f"own:users:{page}"),
+             InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
+        ])
+        return await q.edit_message_text(txt, reply_markup=kb)
+
+    if data == "own:reply":
+        if not is_shop_owner(shop_id, uid):
+            return await q.answer("Not authorized", show_alert=True)
+        target_uid = int(ctx.user_data.get("selected_user", 0))
+        if not target_uid:
+            return await q.answer("Select a user first.", show_alert=True)
+        ctx.user_data["flow"] = "own_reply_user"
+        return await q.edit_message_text(f"💬 Reply to {target_uid}\n\nType your message:", reply_markup=kb_owner_menu(shop_id))
+
+    if data == "own:balmenu":
+        if not is_shop_owner(shop_id, uid):
+            return await q.answer("Not authorized", show_alert=True)
+        target_uid = int(ctx.user_data.get("selected_user", 0))
+        if not target_uid:
+            return await q.answer("Select a user first.", show_alert=True)
+        bal = get_balance(shop_id, target_uid)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Add", callback_data="own:bal_add"),
+             InlineKeyboardButton("➖ Subtract", callback_data="own:bal_sub")],
+            [InlineKeyboardButton("🧾 Set Exact", callback_data="own:bal_set"),
+             InlineKeyboardButton("⬅️ Back", callback_data=f"own:user:{target_uid}:{int(ctx.user_data.get('selected_user_page',0))}")],
+        ])
+        return await q.edit_message_text(f"💰 Edit Balance for {target_uid}\n\nCurrent: {money(bal)}\n\nChoose:", reply_markup=kb)
+
+    if data in ("own:bal_add", "own:bal_sub", "own:bal_set"):
+        if not is_shop_owner(shop_id, uid):
+            return await q.answer("Not authorized", show_alert=True)
+        target_uid = int(ctx.user_data.get("selected_user", 0))
+        if not target_uid:
+            return await q.answer("Select a user first.", show_alert=True)
+        ctx.user_data["flow"] = data  # reuse as flow name
+        hint = "Send amount to ADD:" if data == "own:bal_add" else ("Send amount to SUBTRACT:" if data == "own:bal_sub" else "Send new exact balance:")
+        return await q.edit_message_text(f"{hint}\n(example 10 or 10.5)", reply_markup=kb_owner_menu(shop_id))
+
+    # Owner: Resellers
     if data.startswith("own:resellers:"):
         if not is_shop_owner(shop_id, uid):
             return await q.answer("Not authorized", show_alert=True)
@@ -1578,8 +1648,9 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         btns = []
         for r in rs:
             tag = "✅" if int(r["is_active"]) == 1 else "🚫"
-            btns.append(InlineKeyboardButton(f"{tag} {r['login_username']} (uid {r['user_id']})", callback_data=f"own:res_view:{r['user_id']}:{page}"))
-        kb = rows2(btns, 1)
+            btns.append(InlineKeyboardButton(f"{tag} {r['login_username']} (uid {r['user_id']})",
+                                             callback_data=f"own:res_view:{r['user_id']}:{page}"))
+        kb = rows(btns, 1)
         nav = []
         if page > 0:
             nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"own:resellers:{page-1}"))
@@ -1635,12 +1706,11 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         page = int(parts[3])
         ctx.user_data["flow"] = "own_res_pw"
         ctx.user_data["res_uid"] = res_uid
-        ctx.user_data["res_page"] = page
         return await q.edit_message_text("🔑 Send new password:", reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("⬅️ Back", callback_data=f"own:res_view:{res_uid}:{page}")]
         ]))
 
-    # Owner: danger zone (delete own shop)
+    # Danger Zone delete own shop (not main)
     if data == "own:danger":
         if not is_shop_owner(shop_id, uid):
             return await q.answer("Not authorized", show_alert=True)
@@ -1650,7 +1720,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🗑️ Delete My Shop", callback_data="own:delete_confirm"),
              InlineKeyboardButton("⬅️ Back", callback_data="own:menu")]
         ])
-        return await q.edit_message_text("⚠️ Danger Zone\n\nDeleting shop will remove products, keys, deposits, history, resellers.\n\nProceed?", reply_markup=kb)
+        return await q.edit_message_text("⚠️ Danger Zone\n\nDelete will remove everything in this shop.\n\nProceed?", reply_markup=kb)
 
     if data == "own:delete_confirm":
         if not is_shop_owner(shop_id, uid):
@@ -1661,7 +1731,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         set_active_shop_id(ctx, get_main_shop_id())
         return await q.edit_message_text("🗑️ Shop deleted.", reply_markup=kb_home(get_main_shop_id(), uid))
 
-    # Super Admin platform
+    # ===================== SUPER ADMIN PLATFORM =====================
     if data == "sa:menu":
         if not (shop_id == get_main_shop_id() and is_super_admin(uid)):
             return await q.answer("Not authorized", show_alert=True)
@@ -1671,18 +1741,19 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not (shop_id == get_main_shop_id() and is_super_admin(uid)):
             return await q.answer("Not authorized", show_alert=True)
         page = int(data.split(":")[-1])
-        rows = list_shops(PAGE_SIZE, page * PAGE_SIZE)
-        if not rows:
+        rows_s = list_shops(PAGE_SIZE, page * PAGE_SIZE)
+        if not rows_s:
             return await q.edit_message_text("No shops.", reply_markup=kb_sa_menu())
         btns = []
-        for r in rows:
+        for r in rows_s:
             tag = "⛔" if int(r["is_suspended"]) == 1 else "✅"
-            btns.append(InlineKeyboardButton(f"{tag} #{r['id']} • owner {r['owner_id']} • {r['shop_name']}", callback_data=f"sa:shop:{r['id']}:{page}"))
-        kb = rows2(btns, 1)
+            btns.append(InlineKeyboardButton(f"{tag} #{r['id']} • owner {r['owner_id']} • {r['shop_name']}",
+                                             callback_data=f"sa:shop:{r['id']}:{page}"))
+        kb = rows(btns, 1)
         nav = []
         if page > 0:
             nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"sa:shops:{page-1}"))
-        if len(rows) == PAGE_SIZE:
+        if len(rows_s) == PAGE_SIZE:
             nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"sa:shops:{page+1}"))
         if nav:
             kb.append(nav)
@@ -1698,6 +1769,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         s = get_shop(sid)
         if not s:
             return await q.answer("Not found", show_alert=True)
+
         txt = (
             f"🏪 Shop #{sid}\n\n"
             f"Owner: {s['owner_id']}\n"
@@ -1707,6 +1779,8 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"Reason: {s['suspended_reason'] or '-'}"
         )
         kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("👥 Users", callback_data=f"sa:users:{sid}:0"),
+             InlineKeyboardButton("💰 Edit Balance", callback_data=f"sa:balpick:{sid}:0")],
             [InlineKeyboardButton("⛔ Suspend", callback_data=f"sa:suspend:{sid}:{page}"),
              InlineKeyboardButton("✅ Unsuspend", callback_data=f"sa:unsuspend:{sid}:{page}")],
             [InlineKeyboardButton("🚫 Ban Owner", callback_data=f"sa:ban:{s['owner_id']}:{page}"),
@@ -1716,59 +1790,104 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ])
         return await q.edit_message_text(txt, reply_markup=kb)
 
-    if data.startswith("sa:suspend:"):
+    # Super Admin: list users of a shop
+    if data.startswith("sa:users:"):
+        if not (shop_id == get_main_shop_id() and is_super_admin(uid)):
+            return await q.answer("Not authorized", show_alert=True)
         parts = data.split(":")
         sid = int(parts[2])
         page = int(parts[3])
+        total = count_shop_users(sid)
+        rowsu = list_shop_users(sid, PAGE_SIZE, page * PAGE_SIZE)
+        if not rowsu:
+            return await q.edit_message_text("No users in this shop yet.", reply_markup=kb_sa_menu())
+
+        btns = []
+        for r in rowsu:
+            uname = ("@" + r["username"]) if r["username"] else ""
+            btns.append(InlineKeyboardButton(f"{r['user_id']} {uname} • {money(int(r['balance_cents']))}",
+                                             callback_data=f"sa:user:{sid}:{r['user_id']}:{page}"))
+        kb = rows(btns, 1)
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"sa:users:{sid}:{page-1}"))
+        if (page + 1) * PAGE_SIZE < total:
+            nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"sa:users:{sid}:{page+1}"))
+        if nav:
+            kb.append(nav)
+        kb.append([InlineKeyboardButton("⬅️ Back", callback_data=f"sa:shop:{sid}:0")])
+        return await q.edit_message_text(f"👥 Shop #{sid} Users (Total {total})", reply_markup=InlineKeyboardMarkup(kb))
+
+    # Super Admin: user detail + balance edit
+    if data.startswith("sa:user:"):
+        if not (shop_id == get_main_shop_id() and is_super_admin(uid)):
+            return await q.answer("Not authorized", show_alert=True)
+        parts = data.split(":")
+        sid = int(parts[2])
+        target_uid = int(parts[3])
+        page = int(parts[4])
+        ensure_shop_user(sid, target_uid)
+        bal = get_balance(sid, target_uid)
+
+        ctx.user_data["sa_sel_shop"] = sid
+        ctx.user_data["sa_sel_user"] = target_uid
+        ctx.user_data["sa_sel_page"] = page
+
+        txt = f"🧾 Super Admin\n\nShop #{sid}\nUser {target_uid}\nBalance: {money(bal)}"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("➕ Add", callback_data="sa:bal_add"),
+             InlineKeyboardButton("➖ Subtract", callback_data="sa:bal_sub")],
+            [InlineKeyboardButton("🧾 Set Exact", callback_data="sa:bal_set"),
+             InlineKeyboardButton("⬅️ Back", callback_data=f"sa:users:{sid}:{page}")],
+        ])
+        return await q.edit_message_text(txt, reply_markup=kb)
+
+    if data in ("sa:bal_add", "sa:bal_sub", "sa:bal_set"):
+        if not (shop_id == get_main_shop_id() and is_super_admin(uid)):
+            return await q.answer("Not authorized", show_alert=True)
+        ctx.user_data["flow"] = data
+        hint = "Send amount to ADD:" if data == "sa:bal_add" else ("Send amount to SUBTRACT:" if data == "sa:bal_sub" else "Send new exact balance:")
+        return await q.edit_message_text(f"{hint}\n(example 10 or 10.5)", reply_markup=kb_sa_menu())
+
+    if data.startswith("sa:suspend:"):
+        if not (shop_id == get_main_shop_id() and is_super_admin(uid)):
+            return await q.answer("Not authorized", show_alert=True)
+        parts = data.split(":")
+        sid = int(parts[2])
         ctx.user_data["flow"] = "sa_suspend_reason"
         ctx.user_data["sid"] = sid
-        ctx.user_data["sa_page"] = page
-        return await q.edit_message_text("⛔ Send suspension reason:", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ Back", callback_data=f"sa:shop:{sid}:{page}")]
-        ]))
+        return await q.edit_message_text("⛔ Send suspension reason:", reply_markup=kb_sa_menu())
 
     if data.startswith("sa:unsuspend:"):
-        parts = data.split(":")
-        sid = int(parts[2])
-        page = int(parts[3])
+        if not (shop_id == get_main_shop_id() and is_super_admin(uid)):
+            return await q.answer("Not authorized", show_alert=True)
+        sid = int(data.split(":")[2])
         set_shop_suspension(sid, False, None)
-        return await q.edit_message_text("✅ Unsuspended.", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ Back", callback_data=f"sa:shop:{sid}:{page}"),
-             InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
-        ]))
+        return await q.edit_message_text("✅ Unsuspended.", reply_markup=kb_sa_menu())
 
     if data.startswith("sa:ban:"):
-        parts = data.split(":")
-        owner_id = int(parts[2])
-        page = int(parts[3])
+        if not (shop_id == get_main_shop_id() and is_super_admin(uid)):
+            return await q.answer("Not authorized", show_alert=True)
+        owner_id = int(data.split(":")[2])
         set_owner_ban(owner_id, True, "Banned by Super Admin")
-        return await q.edit_message_text("🚫 Owner banned (permanent).", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ Back", callback_data=f"sa:shops:{page}"),
-             InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
-        ]))
+        return await q.edit_message_text("🚫 Owner banned (permanent).", reply_markup=kb_sa_menu())
 
     if data.startswith("sa:restrict7:"):
-        parts = data.split(":")
-        owner_id = int(parts[2])
-        page = int(parts[3])
+        if not (shop_id == get_main_shop_id() and is_super_admin(uid)):
+            return await q.answer("Not authorized", show_alert=True)
+        owner_id = int(data.split(":")[2])
         until = (now_utc() + datetime.timedelta(days=7)).isoformat(timespec="seconds")
         set_owner_restrict(owner_id, until, "Restricted 7 days by Super Admin")
-        return await q.edit_message_text("⏳ Owner restricted for 7 days.", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ Back", callback_data=f"sa:shops:{page}"),
-             InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
-        ]))
+        return await q.edit_message_text("⏳ Owner restricted for 7 days.", reply_markup=kb_sa_menu())
 
     if data.startswith("sa:delshop:"):
-        parts = data.split(":")
-        sid = int(parts[2])
-        page = int(parts[3])
+        if not (shop_id == get_main_shop_id() and is_super_admin(uid)):
+            return await q.answer("Not authorized", show_alert=True)
+        sid = int(data.split(":")[2])
         if sid == get_main_shop_id():
             return await q.answer("Cannot delete main shop.", show_alert=True)
         delete_shop_hard(sid)
-        return await q.edit_message_text("🗑️ Shop deleted.", reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ Back", callback_data=f"sa:shops:{page}"),
-             InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
-        ]))
+        return await q.edit_message_text("🗑️ Shop deleted.", reply_markup=kb_sa_menu())
 
     if data == "sa:offer":
         if not (shop_id == get_main_shop_id() and is_super_admin(uid)):
@@ -1798,21 +1917,21 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["dep_amount"] = amt
         return await send_clean(update, ctx, f"✅ Amount set: {money(amt)}\nNow send screenshot (photo).", reply_markup=kb_back_home())
 
-    # Support message send
+    # Support
     if flow == "support_send":
         add_support_msg(shop_id, uid, text)
         owner_id = int(get_shop(shop_id)["owner_id"])
-        await ctx.bot.send_message(
-            chat_id=owner_id,
-            text=f"📩 Support message (Shop #{shop_id})\nFrom: {uid}\n\n{text}",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("↩️ Reply", callback_data=f"own:user:{uid}:0")]
-            ])
-        )
+        try:
+            await ctx.bot.send_message(
+                chat_id=owner_id,
+                text=f"📩 Support (Shop #{shop_id})\nFrom: {uid}\n\n{text}"
+            )
+        except Exception:
+            pass
         ctx.user_data["flow"] = None
         return await send_clean(update, ctx, "✅ Sent to owner.", reply_markup=kb_home(shop_id, uid))
 
-    # Reseller login flow
+    # Reseller login
     if flow == "res_login_user":
         ctx.user_data["res_login_user"] = text.strip().lower()
         ctx.user_data["flow"] = "res_login_pw"
@@ -1843,7 +1962,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["flow"] = None
         return await send_clean(update, ctx, "✅ Store updated.", reply_markup=kb_owner_menu(shop_id))
 
-    # Owner wallet edit (per shop)
+    # Owner wallet edit
     if flow == "own_wallet_edit":
         if not is_shop_owner(shop_id, uid):
             ctx.user_data["flow"] = None
@@ -1939,22 +2058,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["flow"] = None
         return await send_clean(update, ctx, "✅ Prices updated.", reply_markup=kb_owner_menu(shop_id))
 
-    # Owner add keys (simple: type product ID then keys list)
-    if flow == "own_keys_pick_product":
-        if not is_shop_owner(shop_id, uid):
-            ctx.user_data["flow"] = None
-            return await send_clean(update, ctx, "Not authorized.", reply_markup=kb_home(shop_id, uid))
-        try:
-            pid = int(text)
-        except Exception:
-            return await send_clean(update, ctx, "Send a numeric product ID.", reply_markup=kb_owner_menu(shop_id))
-        p = get_product(shop_id, pid)
-        if not p:
-            return await send_clean(update, ctx, "Product not found.", reply_markup=kb_owner_menu(shop_id))
-        ctx.user_data["flow"] = "own_keys_add"
-        ctx.user_data["pid"] = pid
-        return await send_clean(update, ctx, "✅ Now send keys (one per line).", reply_markup=kb_owner_menu(shop_id))
-
+    # Owner add keys
     if flow == "own_keys_add":
         if not is_shop_owner(shop_id, uid):
             ctx.user_data["flow"] = None
@@ -1965,18 +2069,42 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["flow"] = None
         return await send_clean(update, ctx, f"✅ Added {n} keys.", reply_markup=kb_owner_menu(shop_id))
 
-    # Owner reply to user
+    # Owner reply user
     if flow == "own_reply_user":
         if not is_shop_owner(shop_id, uid):
             ctx.user_data["flow"] = None
             return await send_clean(update, ctx, "Not authorized.", reply_markup=kb_home(shop_id, uid))
-        target_uid = int(ctx.user_data.get("reply_to_uid", 0))
+        target_uid = int(ctx.user_data.get("selected_user", 0))
+        if not target_uid:
+            ctx.user_data["flow"] = None
+            return await send_clean(update, ctx, "Select a user first.", reply_markup=kb_owner_menu(shop_id))
         try:
             await ctx.bot.send_message(chat_id=target_uid, text=f"📩 Reply from shop owner:\n\n{text}")
         except Exception:
             pass
         ctx.user_data["flow"] = None
         return await send_clean(update, ctx, "✅ Sent.", reply_markup=kb_owner_menu(shop_id))
+
+    # Owner balance edit flows
+    if flow in ("own:bal_add", "own:bal_sub", "own:bal_set"):
+        if not is_shop_owner(shop_id, uid):
+            ctx.user_data["flow"] = None
+            return await send_clean(update, ctx, "Not authorized.", reply_markup=kb_home(shop_id, uid))
+        target_uid = int(ctx.user_data.get("selected_user", 0))
+        amt = to_cents(text)
+        if amt is None:
+            return await send_clean(update, ctx, "Send amount like 10 or 10.5", reply_markup=kb_owner_menu(shop_id))
+
+        if flow == "own:bal_add":
+            add_balance_delta(shop_id, target_uid, amt)
+        elif flow == "own:bal_sub":
+            add_balance_delta(shop_id, target_uid, -amt)
+        else:
+            set_balance_absolute(shop_id, target_uid, amt)
+
+        ctx.user_data["flow"] = None
+        newb = get_balance(shop_id, target_uid)
+        return await send_clean(update, ctx, f"✅ Balance updated.\nUser {target_uid}: {money(newb)}", reply_markup=kb_owner_menu(shop_id))
 
     # Owner add reseller flow
     if flow == "own_res_add_tg":
@@ -1985,7 +2113,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return await send_clean(update, ctx, "Not authorized.", reply_markup=kb_home(shop_id, uid))
         ctx.user_data["res_tg"] = text.strip()
         ctx.user_data["flow"] = "own_res_add_login"
-        return await send_clean(update, ctx, "Send reseller login username (for login screen):", reply_markup=kb_owner_menu(shop_id))
+        return await send_clean(update, ctx, "Send reseller login username:", reply_markup=kb_owner_menu(shop_id))
 
     if flow == "own_res_add_login":
         ctx.user_data["res_login"] = text.strip()
@@ -2003,7 +2131,6 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["flow"] = None
         return await send_clean(update, ctx, ("✅ " if ok else "❌ ") + msg, reply_markup=kb_owner_menu(shop_id))
 
-    # Owner change reseller password
     if flow == "own_res_pw":
         if not is_shop_owner(shop_id, uid):
             ctx.user_data["flow"] = None
@@ -2037,7 +2164,7 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["flow"] = None
         return await send_clean(update, ctx, "✅ Deposit note updated.", reply_markup=kb_owner_menu(shop_id))
 
-    # Super Admin suspend reason / offer edit
+    # Super Admin flows
     if flow == "sa_suspend_reason":
         sid = int(ctx.user_data.get("sid", 0))
         set_shop_suspension(sid, True, text)
@@ -2048,6 +2175,28 @@ async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         set_panel_offer_text(text)
         ctx.user_data["flow"] = None
         return await send_clean(update, ctx, "✅ Updated panel offer text.", reply_markup=kb_sa_menu())
+
+    if flow in ("sa:bal_add", "sa:bal_sub", "sa:bal_set"):
+        if not is_super_admin(uid):
+            ctx.user_data["flow"] = None
+            return await send_clean(update, ctx, "Not authorized.", reply_markup=kb_sa_menu())
+
+        sid = int(ctx.user_data.get("sa_sel_shop", 0))
+        target_uid = int(ctx.user_data.get("sa_sel_user", 0))
+        amt = to_cents(text)
+        if amt is None:
+            return await send_clean(update, ctx, "Send amount like 10 or 10.5", reply_markup=kb_sa_menu())
+
+        if flow == "sa:bal_add":
+            add_balance_delta(sid, target_uid, amt)
+        elif flow == "sa:bal_sub":
+            add_balance_delta(sid, target_uid, -amt)
+        else:
+            set_balance_absolute(sid, target_uid, amt)
+
+        ctx.user_data["flow"] = None
+        newb = get_balance(sid, target_uid)
+        return await send_clean(update, ctx, f"✅ Updated.\nShop #{sid} User {target_uid} = {money(newb)}", reply_markup=kb_sa_menu())
 
     # Default ignore
     return
