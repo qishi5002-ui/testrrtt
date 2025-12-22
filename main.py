@@ -125,10 +125,13 @@ def init_db():
             CREATE TABLE IF NOT EXISTS users(
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
+                first_name TEXT,
+                last_name TEXT,
                 created_at TEXT NOT NULL
             )
         """)
 
+        
         # WALLETS
         conn.execute("""
             CREATE TABLE IF NOT EXISTS wallets(
@@ -237,21 +240,24 @@ def init_db():
 
 # ===================== USERS =====================
 def upsert_user(u):
+    if not u:
+        return
     with db() as conn:
-        uid = u.id
-        uname = safe_username(u)
-        exists = conn.execute("SELECT 1 FROM users WHERE user_id=?", (uid,)).fetchone()
-        if exists:
-            conn.execute("""
-            UPDATE users SET username=?, first_name=?, last_name=?, updated_at=?
-            WHERE user_id=?
-            """, (uname, u.first_name, u.last_name, now_iso(), uid))
-        else:
-            conn.execute("""
-            INSERT INTO users(user_id,username,first_name,last_name,last_bot_msg_id,created_at,updated_at,owner_banned,owner_restrict_until,owner_block_reason)
-            VALUES(?,?,?,?,NULL,?,?,0,NULL,NULL)
-            """, (uid, uname, u.first_name, u.last_name, now_iso(), now_iso()))
-
+        conn.execute("""
+            INSERT INTO users(user_id, username, first_name, last_name, created_at)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username=excluded.username,
+                first_name=excluded.first_name,
+                last_name=excluded.last_name
+        """, (
+            int(u.id),
+            (u.username or ""),
+            (u.first_name or ""),
+            (u.last_name or ""),
+            now_iso()
+        ))
+        
 def get_last_bot_msg_id(uid: int) -> Optional[int]:
     with db() as conn:
         r = conn.execute("SELECT last_bot_msg_id FROM users WHERE user_id=?", (uid,)).fetchone()
