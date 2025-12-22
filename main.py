@@ -1,4 +1,4 @@
-import os
+lg import os
 import sqlite3
 import datetime
 import hashlib
@@ -974,7 +974,7 @@ async def _stay_or_back_to(ctx: ContextTypes.DEFAULT_TYPE, q, text: str, stay_cb
 # ============================================================
 # MAIN CALLBACK HANDLER
 # ============================================================
-async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     upsert_user(q.from_user)
