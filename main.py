@@ -1,4 +1,4 @@
-lg import os
+import os
 import sqlite3
 import datetime
 import hashlib
