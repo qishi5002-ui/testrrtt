@@ -1,9 +1,12 @@
 # ===================== IMPORTS =====================
 import os
-import sqlite3
-import datetime
+import asyncio
 import hashlib
-from typing import Optional, List, Tuple
+import datetime
+from typing import Optional, List
+
+import psycopg2
+import psycopg2.extras
 
 from telegram import (
     Update,
@@ -12,8 +15,8 @@ from telegram import (
 )
 from telegram.ext import (
     ApplicationBuilder,
-    CallbackQueryHandler,
     CommandHandler,
+    CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
     filters,
@@ -21,206 +24,17 @@ from telegram.ext import (
 
 # ===================== ENV =====================
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-SUPER_ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-DB_PATH = os.getenv("DB_PATH", "rekkoshop.db")
-CURRENCY = os.getenv("CURRENCY", "USD")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
-PANEL_PRICE_CENTS = 1000  # $10
-PANEL_DAYS = 30
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN missing")
+if ADMIN_ID == 0:
+    raise RuntimeError("ADMIN_ID missing")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL missing")
 
-DEFAULT_MAIN_SHOP_NAME = "RekkoShop"
-DEFAULT_MAIN_WELCOME = "Welcome To RekkoShop , Receive your keys instantly here"
-DEFAULT_BRAND = "Bot created by @RekkoOwn"
-
-# ===================== TIME / MONEY =====================
-def now_utc():
-    return datetime.datetime.utcnow()
-
-def now_iso():
-    return now_utc().isoformat(timespec="seconds")
-
-def parse_iso(s: str):
-    return datetime.datetime.fromisoformat(s)
-
-def money(cents: int):
-    return f"{cents/100:.2f} {CURRENCY}"
-
-def sha256(s: str):
-    return hashlib.sha256(s.encode()).hexdigest()
-
-# ===================== DB =====================
-def db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-def init_db():
-    with db() as conn:
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS settings(
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS users(
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            owner_banned INTEGER DEFAULT 0,
-            owner_restrict_until TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS shops(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            owner_id INTEGER NOT NULL,
-            shop_name TEXT NOT NULL,
-            welcome_text TEXT NOT NULL,
-            panel_until TEXT,
-            is_suspended INTEGER DEFAULT 0,
-            suspended_reason TEXT,
-            created_at TEXT NOT NULL
-        );
-        """)
-
-        # Ensure main shop
-        r = conn.execute("SELECT id FROM shops ORDER BY id ASC LIMIT 1").fetchone()
-        if not r:
-            conn.execute("""
-            INSERT INTO shops(owner_id, shop_name, welcome_text, created_at)
-            VALUES(?,?,?,?)
-            """, (SUPER_ADMIN_ID, DEFAULT_MAIN_SHOP_NAME, DEFAULT_MAIN_WELCOME, now_iso()))
-
-        # Panel offer text
-        if not conn.execute("SELECT 1 FROM settings WHERE key='panel_offer'").fetchone():
-            conn.execute("""
-            INSERT INTO settings(key,value) VALUES(?,?)
-            """, (
-                "panel_offer",
-                "⭐ Get Own Panel ($10/month)\n\n"
-                "• Your own shop\n"
-                "• Your own owner panel\n"
-                "• Your own branding\n\n"
-                "Renews automatically."
-            ))
-
-# ===================== USERS =====================
-def upsert_user(u):
-    with db() as conn:
-        r = conn.execute("SELECT 1 FROM users WHERE user_id=?", (u.id,)).fetchone()
-        if r:
-            conn.execute("""
-            UPDATE users SET username=?, first_name=?, last_name=?, updated_at=?
-            WHERE user_id=?
-            """, (u.username, u.first_name, u.last_name, now_iso(), u.id))
-        else:
-            conn.execute("""
-            INSERT INTO users(user_id,username,first_name,last_name,created_at,updated_at)
-            VALUES(?,?,?,?,?,?)
-            """, (u.id, u.username, u.first_name, u.last_name, now_iso(), now_iso()))
-
-def is_super_admin(uid: int):
-    return uid == SUPER_ADMIN_ID
-
-def owner_banned(uid: int):
-    with db() as conn:
-        r = conn.execute("SELECT owner_banned FROM users WHERE user_id=?", (uid,)).fetchone()
-        return bool(r and r["owner_banned"])
-
-def owner_restricted(uid: int):
-    with db() as conn:
-        r = conn.execute("SELECT owner_restrict_until FROM users WHERE user_id=?", (uid,)).fetchone()
-        if not r or not r["owner_restrict_until"]:
-            return False
-        return parse_iso(r["owner_restrict_until"]) > now_utc()
-
-# ===================== SHOPS =====================
-def get_main_shop_id():
-    return 1
-
-def get_shop(shop_id: int):
-    with db() as conn:
-        return conn.execute("SELECT * FROM shops WHERE id=?", (shop_id,)).fetchone()
-
-def create_shop(owner_id: int):
-    with db() as conn:
-        conn.execute("""
-        INSERT INTO shops(owner_id, shop_name, welcome_text, created_at)
-        VALUES(?,?,?,?)
-        """, (owner_id, f"{owner_id}'s Shop", "Welcome! Customize your store.", now_iso()))
-        return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-
-def is_shop_owner(shop_id: int, uid: int):
-    s = get_shop(shop_id)
-    return bool(s and s["owner_id"] == uid)
-
-def panel_active(shop_id: int):
-    s = get_shop(shop_id)
-    if not s or not s["panel_until"]:
-        return False
-    return parse_iso(s["panel_until"]) > now_utc()
-
-def renew_panel(shop_id: int):
-    until = (now_utc() + datetime.timedelta(days=PANEL_DAYS)).isoformat(timespec="seconds")
-    with db() as conn:
-        conn.execute("UPDATE shops SET panel_until=? WHERE id=?", (until, shop_id))
-
-# ===================== UI =====================
-def kb_home(shop_id: int, uid: int):
-    rows = [
-        [InlineKeyboardButton("⭐ Get Own Panel", callback_data="panel:info")]
-    ]
-
-    if is_shop_owner(shop_id, uid) and panel_active(shop_id):
-        rows.insert(0, [InlineKeyboardButton("🛠 Owner Panel", callback_data="own:menu")])
-
-    if shop_id != get_main_shop_id():
-        rows.append([InlineKeyboardButton("⬅ Back to RekkoShop", callback_data="shop:main")])
-
-    if shop_id == get_main_shop_id() and is_super_admin(uid):
-        rows.append([InlineKeyboardButton("🧾 Platform", callback_data="sa:menu")])
-
-    return InlineKeyboardMarkup(rows)
-
-# ===================== IMPORTS =====================
-import os
-import sqlite3
-import datetime
-import hashlib
-from typing import Optional, List, Tuple
-
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-from telegram.ext import (
-    ApplicationBuilder,
-    CallbackQueryHandler,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
-
-# ===================== ENV =====================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-SUPER_ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-DB_PATH = os.getenv("DB_PATH", "rekkoshop.db")
-CURRENCY = os.getenv("CURRENCY", "USD")
-
-PLATFORM_USDT_TRC20_ADDRESS = os.getenv("USDT_TRC20_ADDRESS", "").strip()
-
-PANEL_PRICE_CENTS = 1000  # $10
-PANEL_DAYS = 30
-PAGE_SIZE = 8
-
-DEFAULT_MAIN_SHOP_NAME = "RekkoShop"
-DEFAULT_MAIN_WELCOME = "Welcome To RekkoShop , Receive your keys instantly here"
-DEFAULT_BRAND = "Bot created by @RekkoOwn"
-
+CURRENCY = "USD"
 
 # ===================== TIME / MONEY =====================
 def now_utc():
@@ -228,16 +42,13 @@ def now_utc():
 
 def now_iso():
     return now_utc().isoformat(timespec="seconds")
-
-def parse_iso(s: str):
-    return datetime.datetime.fromisoformat(s)
 
 def money(cents: int) -> str:
     return f"{cents/100:.2f} {CURRENCY}"
 
-def to_cents(s: str) -> Optional[int]:
+def to_cents(txt: str) -> Optional[int]:
     try:
-        v = float(s.replace(",", "."))
+        v = float(txt.strip())
         if v <= 0:
             return None
         return int(round(v * 100))
@@ -247,617 +58,571 @@ def to_cents(s: str) -> Optional[int]:
 def sha256(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()
 
-def days_left(until_iso: str) -> int:
-    try:
-        until = parse_iso(until_iso)
-        secs = (until - now_utc()).total_seconds()
-        if secs <= 0:
-            return 0
-        return int((secs + 86399) // 86400)
-    except Exception:
-        return 0
-
-
-# ===================== DB =====================
+# ===================== DATABASE =====================
 def db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
+    return psycopg2.connect(
+        DATABASE_URL,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+        sslmode="require",
+    )
 
 def init_db():
     with db() as conn:
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS settings(
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
+        cur = conn.cursor()
 
-        CREATE TABLE IF NOT EXISTS shops(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            owner_id INTEGER NOT NULL,
-            shop_name TEXT NOT NULL,
-            welcome_text TEXT NOT NULL,
-            panel_until TEXT,
-            is_suspended INTEGER DEFAULT 0,
-            suspended_reason TEXT,
-            created_at TEXT NOT NULL,
-            wallet_address TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS users(
-            user_id INTEGER PRIMARY KEY,
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,
             username TEXT,
             first_name TEXT,
-            last_name TEXT,
-            last_bot_msg_id INTEGER,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            owner_banned INTEGER DEFAULT 0,
-            owner_restrict_until TEXT,
-            owner_block_reason TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS shop_users(
-            shop_id INTEGER,
-            user_id INTEGER,
-            balance_cents INTEGER DEFAULT 0,
-            reseller_logged_in INTEGER DEFAULT 0,
-            PRIMARY KEY(shop_id, user_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS categories(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            shop_id INTEGER,
-            name TEXT,
-            is_active INTEGER DEFAULT 1
-        );
-
-        CREATE TABLE IF NOT EXISTS subcategories(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            shop_id INTEGER,
-            category_id INTEGER,
-            name TEXT,
-            is_active INTEGER DEFAULT 1
-        );
-
-        CREATE TABLE IF NOT EXISTS products(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            shop_id INTEGER,
-            category_id INTEGER,
-            subcategory_id INTEGER,
-            name TEXT,
-            user_price_cents INTEGER,
-            reseller_price_cents INTEGER,
-            telegram_link TEXT,
-            is_active INTEGER DEFAULT 1
-        );
-
-        CREATE TABLE IF NOT EXISTS keys(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            shop_id INTEGER,
-            product_id INTEGER,
-            key_text TEXT,
-            is_used INTEGER DEFAULT 0,
-            used_by INTEGER,
-            used_at TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS purchases(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            shop_id INTEGER,
-            user_id INTEGER,
-            product_id INTEGER,
-            product_name TEXT,
-            price_cents INTEGER,
-            key_text TEXT,
-            created_at TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS deposits(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            shop_id INTEGER,
-            user_id INTEGER,
-            amount_cents INTEGER,
-            photo_file_id TEXT,
-            caption TEXT,
-            status TEXT,
-            created_at TEXT,
-            reviewed_at TEXT,
-            reviewed_by INTEGER
-        );
-
-        CREATE TABLE IF NOT EXISTS resellers(
-            shop_id INTEGER,
-            user_id INTEGER,
-            tg_username TEXT,
-            login_username TEXT,
-            password_hash TEXT,
-            is_active INTEGER DEFAULT 1,
-            created_at TEXT,
-            PRIMARY KEY(shop_id, user_id)
-        );
+            created_at TEXT NOT NULL
+        )
         """)
 
-        # Ensure main shop exists
-        r = conn.execute("SELECT id FROM shops WHERE id=1").fetchone()
-        if not r:
-            conn.execute("""
-            INSERT INTO shops
-            (id, owner_id, shop_name, welcome_text, created_at, wallet_address)
-            VALUES (1,?,?,?,?,?)
-            """, (
-                SUPER_ADMIN_ID,
-                DEFAULT_MAIN_SHOP_NAME,
-                DEFAULT_MAIN_WELCOME,
-                now_iso(),
-                PLATFORM_USDT_TRC20_ADDRESS or None
-            ))
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            price_cents INTEGER NOT NULL,
+            telegram_link TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1
+        )
+        """)
 
-        if not conn.execute("SELECT 1 FROM settings WHERE key='panel_offer'").fetchone():
-            conn.execute(
-                "INSERT INTO settings(key,value) VALUES(?,?)",
-                ("panel_offer",
-                 "⭐ Get Own Panel ($10/month)\n\n"
-                 "• Your own store\n"
-                 "• Your own wallet\n"
-                 "• Full owner panel\n\n"
-                 "Auto-renews from YOUR shop balance.")
-            )
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS keys (
+            id SERIAL PRIMARY KEY,
+            product_id INTEGER NOT NULL,
+            key_text TEXT NOT NULL,
+            is_used INTEGER NOT NULL DEFAULT 0,
+            used_by BIGINT,
+            used_at TEXT
+        )
+        """)
 
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS purchases (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            product_id INTEGER NOT NULL,
+            product_name TEXT NOT NULL,
+            price_cents INTEGER NOT NULL,
+            key_text TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS wallet (
+            user_id BIGINT PRIMARY KEY,
+            balance_cents INTEGER NOT NULL DEFAULT 0
+        )
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS deposits (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            amount_cents INTEGER NOT NULL,
+            photo_file_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """)
+
+        conn.commit()
 
 # ===================== USERS =====================
 def upsert_user(u):
     with db() as conn:
-        r = conn.execute("SELECT 1 FROM users WHERE user_id=?", (u.id,)).fetchone()
-        if r:
-            conn.execute("""
-            UPDATE users SET username=?, first_name=?, last_name=?, updated_at=?
-            WHERE user_id=?
-            """, (u.username, u.first_name, u.last_name, now_iso(), u.id))
+        cur = conn.cursor()
+        cur.execute("""
+        INSERT INTO users (user_id, username, first_name, created_at)
+        VALUES (%s,%s,%s,%s)
+        ON CONFLICT (user_id)
+        DO UPDATE SET username=EXCLUDED.username
+        """, (
+            u.id,
+            u.username,
+            u.first_name,
+            now_iso(),
+        ))
+        cur.execute("""
+        INSERT INTO wallet (user_id, balance_cents)
+        VALUES (%s,0)
+        ON CONFLICT (user_id) DO NOTHING
+        """, (u.id,))
+        conn.commit()
+
+def get_balance(uid: int) -> int:
+    with db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT balance_cents FROM wallet WHERE user_id=%s", (uid,))
+        r = cur.fetchone()
+        return int(r["balance_cents"]) if r else 0
+
+def add_balance(uid: int, delta: int):
+    with db() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+        UPDATE wallet
+        SET balance_cents = balance_cents + %s
+        WHERE user_id=%s
+        """, (delta, uid))
+        conn.commit()
+
+# ===================== PRODUCTS =====================
+def list_products(active_only=True):
+    with db() as conn:
+        cur = conn.cursor()
+        if active_only:
+            cur.execute("""
+            SELECT p.*,
+            (SELECT COUNT(*) FROM keys k WHERE k.product_id=p.id AND k.is_used=0) AS stock
+            FROM products p
+            WHERE is_active=1
+            ORDER BY id ASC
+            """)
         else:
-            conn.execute("""
-            INSERT INTO users(user_id,username,first_name,last_name,created_at,updated_at)
-            VALUES(?,?,?,?,?,?)
-            """, (u.id, u.username, u.first_name, u.last_name, now_iso(), now_iso()))
+            cur.execute("""
+            SELECT p.*,
+            (SELECT COUNT(*) FROM keys k WHERE k.product_id=p.id AND k.is_used=0) AS stock
+            FROM products p
+            ORDER BY id ASC
+            """)
+        return cur.fetchall()
 
-
-# ===================== SHOP USERS / BALANCE =====================
-def ensure_shop_user(shop_id: int, uid: int):
+def get_product(pid: int):
     with db() as conn:
-        r = conn.execute(
-            "SELECT 1 FROM shop_users WHERE shop_id=? AND user_id=?",
-            (shop_id, uid)
-        ).fetchone()
+        cur = conn.cursor()
+        cur.execute("""
+        SELECT p.*,
+        (SELECT COUNT(*) FROM keys k WHERE k.product_id=p.id AND k.is_used=0) AS stock
+        FROM products p WHERE id=%s
+        """, (pid,))
+        return cur.fetchone()
+
+def take_key(pid: int, uid: int) -> Optional[str]:
+    with db() as conn:
+        cur = conn.cursor()
+        cur.execute("""
+        SELECT id, key_text FROM keys
+        WHERE product_id=%s AND is_used=0
+        ORDER BY id ASC LIMIT 1
+        """, (pid,))
+        r = cur.fetchone()
         if not r:
-            conn.execute(
-                "INSERT INTO shop_users(shop_id,user_id,balance_cents,reseller_logged_in) VALUES(?,?,0,0)",
-                (shop_id, uid)
-            )
+            return None
 
-def get_balance(shop_id: int, uid: int) -> int:
-    ensure_shop_user(shop_id, uid)
-    with db() as conn:
-        r = conn.execute(
-            "SELECT balance_cents FROM shop_users WHERE shop_id=? AND user_id=?",
-            (shop_id, uid)
-        ).fetchone()
-        return int(r["balance_cents"])
+        cur.execute("""
+        UPDATE keys SET is_used=1, used_by=%s, used_at=%s
+        WHERE id=%s
+        """, (uid, now_iso(), r["id"]))
+        conn.commit()
+        return r["key_text"]
 
-def add_balance_delta(shop_id: int, uid: int, delta: int):
-    ensure_shop_user(shop_id, uid)
-    with db() as conn:
-        conn.execute(
-            "UPDATE shop_users SET balance_cents=balance_cents+? WHERE shop_id=? AND user_id=?",
-            (delta, shop_id, uid)
-        )
-
-
-# ===================== SHOPS =====================
-def get_shop(shop_id: int):
-    with db() as conn:
-        return conn.execute("SELECT * FROM shops WHERE id=?", (shop_id,)).fetchone()
-
-def is_shop_owner(shop_id: int, uid: int) -> bool:
-    s = get_shop(shop_id)
-    return bool(s and int(s["owner_id"]) == uid)
-
-def is_panel_active(shop_id: int) -> bool:
-    s = get_shop(shop_id)
-    if not s or not s["panel_until"]:
-        return False
-    try:
-        return parse_iso(s["panel_until"]) > now_utc()
-    except Exception:
-        return False
-
-# ===================== UI HELPERS =====================
-def kb_back_home():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
-    ])
-
-def kb_wallet():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Deposit", callback_data="wallet:deposit")],
-        [InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
-    ])
-
-def kb_products_root():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📂 Categories", callback_data="prod:cats")],
-        [InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
-    ])
-
-def kb_home(shop_id: int, uid: int):
-    ensure_shop_user(shop_id, uid)
-
-    grid = [
+# ===================== UI =====================
+def kb_home(uid: int):
+    buttons = [
         [
-            InlineKeyboardButton("🛍️ Products", callback_data="home:products"),
+            InlineKeyboardButton("🛍 Products", callback_data="home:products"),
             InlineKeyboardButton("💰 Wallet", callback_data="home:wallet"),
         ],
         [
             InlineKeyboardButton("📜 History", callback_data="home:history"),
-            InlineKeyboardButton("📩 Support", callback_data="home:support"),
-        ],
-        [
-            InlineKeyboardButton("⭐ Get Own Panel", callback_data="panel:info"),
         ]
     ]
+    if uid == ADMIN_ID:
+        buttons.append([InlineKeyboardButton("🛠 Admin Panel", callback_data="admin:menu")])
+    return InlineKeyboardMarkup(buttons)
 
-    if is_shop_owner(shop_id, uid):
-        grid.append([InlineKeyboardButton("🛠️ Owner Panel", callback_data="own:menu")])
+def kb_back():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="home")]])
 
-    return InlineKeyboardMarkup(grid)
-
-
-# ===================== SHOP HOME TEXT =====================
-def shop_home_text(shop_id: int) -> str:
-    s = get_shop(shop_id)
-    if not s:
-        return DEFAULT_MAIN_WELCOME + "\n\n" + DEFAULT_BRAND
-
-    if s["panel_until"] and is_panel_active(shop_id):
-        left = days_left(s["panel_until"])
-        return (
-            f"{s['welcome_text']}\n\n"
-            f"🗓 Subscription: {left} day(s) left\n\n"
-            f"— {s['shop_name']}"
-        )
-
-    return f"{s['welcome_text']}\n\n— {s['shop_name']}"
-
-
-# ===================== CLEAN SEND =====================
-async def send_clean(update: Update, ctx, text, reply_markup=None):
-    uid = update.effective_user.id
-    chat_id = update.effective_chat.id
-
-    with db() as conn:
-        r = conn.execute(
-            "SELECT last_bot_msg_id FROM users WHERE user_id=?",
-            (uid,)
-        ).fetchone()
-        if r and r["last_bot_msg_id"]:
-            try:
-                await ctx.bot.delete_message(chat_id, r["last_bot_msg_id"])
-            except Exception:
-                pass
-
-    msg = await ctx.bot.send_message(chat_id, text, reply_markup=reply_markup)
-
-    with db() as conn:
-        conn.execute(
-            "UPDATE users SET last_bot_msg_id=? WHERE user_id=?",
-            (msg.message_id, uid)
-        )
-
-
-# ===================== /START =====================
-async def cmd_start(update: Update, ctx):
+# ===================== START =====================
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     upsert_user(update.effective_user)
     uid = update.effective_user.id
-
     ctx.user_data.clear()
-    ctx.user_data["active_shop_id"] = 1
-
-    ensure_shop_user(1, uid)
-
-    await send_clean(
-        update,
-        ctx,
-        shop_home_text(1),
-        reply_markup=kb_home(1, uid)
+    await update.message.reply_text(
+        "👋 Welcome!\n\nChoose an option:",
+        reply_markup=kb_home(uid)
     )
 
-
 # ===================== CALLBACK HANDLER =====================
-async def on_cb(update: Update, ctx):
+async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
-
     uid = q.from_user.id
     upsert_user(q.from_user)
 
-    shop_id = ctx.user_data.get("active_shop_id", 1)
-    ensure_shop_user(shop_id, uid)
-
     data = q.data
 
-    # ================= HOME =================
-    if data == "home:menu":
+    # HOME
+    if data == "home":
         ctx.user_data.clear()
-        ctx.user_data["active_shop_id"] = shop_id
         return await q.edit_message_text(
-            shop_home_text(shop_id),
-            reply_markup=kb_home(shop_id, uid)
+            "🏠 Main Menu",
+            reply_markup=kb_home(uid)
         )
 
-    if data == "home:wallet":
-        bal = get_balance(shop_id, uid)
-        s = get_shop(shop_id)
-        addr = s["wallet_address"] if s else None
-        txt = (
-            f"💰 Wallet\n\n"
-            f"Balance: {money(bal)}\n\n"
-            f"USDT Address:\n{addr or 'Not set yet'}"
-        )
-        return await q.edit_message_text(txt, reply_markup=kb_wallet())
-
+    # ================= PRODUCTS =================
     if data == "home:products":
-        return await q.edit_message_text("🛍️ Products", reply_markup=kb_products_root())
+        prods = list_products(active_only=True)
+        if not prods:
+            return await q.edit_message_text("No products available.", reply_markup=kb_back())
 
-    # ================= GET FILES (FIXED) =================
-    if data.startswith("getfiles:"):
-        pid = int(data.split(":")[1])
-
-        p = get_product(shop_id, pid)
-        if not p:
-            return await q.answer("Product not found", show_alert=True)
-
-        link = (p["telegram_link"] or "").strip()
-        if not link:
-            return await q.answer("No Telegram link set", show_alert=True)
-
-        # delete previous message
-        try:
-            await ctx.bot.delete_message(
-                chat_id=q.message.chat_id,
-                message_id=q.message.message_id
-            )
-        except Exception:
-            pass
-
-        # send JOIN button (no text link exposed)
-        await ctx.bot.send_message(
-            chat_id=q.message.chat_id,
-            text="📥 Access your files:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("➡️ Join Channel", url=link)],
-                [InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
+        btns = []
+        for p in prods:
+            btns.append([
+                InlineKeyboardButton(
+                    f"{p['name']} • {money(p['price_cents'])} • Stock {p['stock']}",
+                    callback_data=f"prod:{p['id']}"
+                )
             ])
-        )
-        return
+        btns.append([InlineKeyboardButton("⬅ Back", callback_data="home")])
+        return await q.edit_message_text("🛍 Products:", reply_markup=InlineKeyboardMarkup(btns))
 
-    # ================= PANEL INFO =================
-    if data == "panel:info":
-        with db() as conn:
-            offer = conn.execute(
-                "SELECT value FROM settings WHERE key='panel_offer'"
-            ).fetchone()["value"]
+    if data.startswith("prod:"):
+        pid = int(data.split(":")[1])
+        p = get_product(pid)
+        if not p or p["is_active"] != 1:
+            return await q.answer("Product not available", show_alert=True)
 
-        bal = get_balance(1, uid)
+        bal = get_balance(uid)
         txt = (
-            f"{offer}\n\n"
-            f"Price: {money(PANEL_PRICE_CENTS)} / month\n"
+            f"📦 {p['name']}\n\n"
+            f"Price: {money(p['price_cents'])}\n"
+            f"Stock: {p['stock']}\n"
             f"Your balance: {money(bal)}"
         )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🛒 Buy", callback_data=f"buy:{pid}")],
+            [InlineKeyboardButton("⬅ Back", callback_data="home:products")]
+        ])
+        return await q.edit_message_text(txt, reply_markup=kb)
 
-        return await q.edit_message_text(
-            txt,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Buy", callback_data="panel:buy")],
-                [InlineKeyboardButton("🏠 Main Menu", callback_data="home:menu")]
-            ])
-        )
+    # ================= BUY =================
+    if data.startswith("buy:"):
+        pid = int(data.split(":")[1])
+        p = get_product(pid)
+        if not p:
+            return await q.answer("Not found", show_alert=True)
 
-    if data == "panel:buy":
-        if get_balance(1, uid) < PANEL_PRICE_CENTS:
-            return await q.answer("Not enough balance", show_alert=True)
+        if p["stock"] <= 0:
+            return await q.answer("Out of stock", show_alert=True)
 
-        add_balance_delta(1, uid, -PANEL_PRICE_CENTS)
+        price = int(p["price_cents"])
+        if get_balance(uid) < price:
+            return await q.answer("Insufficient balance", show_alert=True)
+
+        key = take_key(pid, uid)
+        if not key:
+            return await q.answer("Out of stock", show_alert=True)
+
+        add_balance(uid, -price)
 
         with db() as conn:
-            conn.execute("""
-            INSERT INTO shops(owner_id, shop_name, welcome_text, panel_until, created_at)
-            VALUES(?,?,?,?,?)
-            """, (
-                uid,
-                f"{uid}'s Shop",
-                "Welcome to your shop!",
-                (now_utc() + datetime.timedelta(days=PANEL_DAYS)).isoformat(),
-                now_iso()
-            ))
-            sid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            cur = conn.cursor()
+            cur.execute("""
+            INSERT INTO purchases (user_id, product_id, product_name, price_cents, key_text, created_at)
+            VALUES (%s,%s,%s,%s,%s,%s)
+            """, (uid, pid, p["name"], price, key, now_iso()))
+            conn.commit()
 
-        ctx.user_data["active_shop_id"] = sid
-        ensure_shop_user(sid, uid)
+        txt = f"✅ Purchase successful!\n\n🔑 Key:\n`{key}`"
+        kb = []
+        if p["telegram_link"]:
+            kb.append([InlineKeyboardButton("📥 Get Files", url=p["telegram_link"])])
+        kb.append([InlineKeyboardButton("🏠 Main Menu", callback_data="home")])
+        return await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
 
+    # ================= WALLET =================
+    if data == "home:wallet":
+        bal = get_balance(uid)
+        txt = f"💰 Wallet\n\nBalance: {money(bal)}"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💳 Deposit", callback_data="wallet:deposit")],
+            [InlineKeyboardButton("⬅ Back", callback_data="home")]
+        ])
+        return await q.edit_message_text(txt, reply_markup=kb)
+
+    if data == "wallet:deposit":
+        ctx.user_data["flow"] = "deposit_amount"
         return await q.edit_message_text(
-            f"✅ Panel activated!\n\nShop ID: {sid}",
-            reply_markup=kb_home(sid, uid)
+            "💳 Deposit\n\nSend amount (example: 10 or 10.5):",
+            reply_markup=kb_back()
         )
 
-    # ================= FALLBACK =================
-    return await q.answer("Unknown action", show_alert=True)
+    # ================= HISTORY =================
+    if data == "home:history":
+        with db() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+            SELECT * FROM purchases
+            WHERE user_id=%s
+            ORDER BY id DESC LIMIT 10
+            """, (uid,))
+            rows = cur.fetchall()
+
+        if not rows:
+            return await q.edit_message_text("No purchases yet.", reply_markup=kb_back())
+
+        txt = "📜 Purchase History\n\n"
+        for r in rows:
+            txt += f"#{r['id']} • {r['product_name']} • {money(r['price_cents'])}\n"
+        return await q.edit_message_text(txt, reply_markup=kb_back())
 
 # ===================== TEXT HANDLER =====================
-async def on_text(update: Update, ctx):
-    upsert_user(update.effective_user)
+async def on_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    shop_id = ctx.user_data.get("active_shop_id", 1)
-    ensure_shop_user(shop_id, uid)
+    upsert_user(update.effective_user)
 
-    text = (update.message.text or "").strip()
     flow = ctx.user_data.get("flow")
+    text = (update.message.text or "").strip()
 
-    # ---------------- Deposit custom amount ----------------
-    if flow == "dep_custom":
+    if flow == "deposit_amount":
         amt = to_cents(text)
         if amt is None:
-            return await send_clean(update, ctx, "Send amount like 10 or 10.5", kb_back_home())
-        ctx.user_data["dep_amount"] = amt
-        ctx.user_data["flow"] = "dep_wait_photo"
-        return await send_clean(update, ctx, f"✅ Amount set: {money(amt)}\nSend payment screenshot.", kb_back_home())
+            return await update.message.reply_text("Invalid amount. Try again.")
 
-    # ---------------- Support message ----------------
-    if flow == "support_send":
-        add_support_msg(shop_id, uid, text)
-        owner_id = get_shop(shop_id)["owner_id"]
-        try:
-            await ctx.bot.send_message(owner_id, f"📩 Support from {uid}:\n\n{text}")
-        except Exception:
-            pass
-        ctx.user_data["flow"] = None
-        return await send_clean(update, ctx, "✅ Message sent.", kb_home(shop_id, uid))
+        ctx.user_data.clear()
 
-    # ---------------- Owner edit store ----------------
-    if flow == "own_edit_store":
-        if "|" not in text:
-            return await send_clean(update, ctx, "Format: Name | Welcome text", kb_home(shop_id, uid))
-        name, welcome = [x.strip() for x in text.split("|", 1)]
-        set_shop_profile(shop_id, name, welcome)
-        ctx.user_data["flow"] = None
-        return await send_clean(update, ctx, "✅ Store updated.", kb_home(shop_id, uid))
+        with db() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+            INSERT INTO deposits (user_id, amount_cents, photo_file_id, status, created_at)
+            VALUES (%s,%s,'TEXT', 'PENDING', %s)
+            """, (uid, amt, now_iso()))
+            conn.commit()
 
-    # ---------------- Owner wallet address ----------------
-    if flow == "own_wallet_edit":
-        if text == "-":
-            set_shop_wallet(shop_id, None)
-        else:
-            set_shop_wallet(shop_id, text)
-        ctx.user_data["flow"] = None
-        return await send_clean(update, ctx, "✅ Wallet updated.", kb_home(shop_id, uid))
-
-    # ---------------- Owner add category ----------------
-    if flow == "own_cat_add":
-        add_category(shop_id, text)
-        ctx.user_data["flow"] = None
-        return await send_clean(update, ctx, "✅ Category added.", kb_home(shop_id, uid))
-
-    # ---------------- Owner add subcategory ----------------
-    if flow == "own_sub_add":
-        cat_id = ctx.user_data.get("cat_id")
-        add_subcategory(shop_id, cat_id, text)
-        ctx.user_data["flow"] = None
-        return await send_clean(update, ctx, "✅ Co-category added.", kb_home(shop_id, uid))
-
-    # ---------------- Owner add product ----------------
-    if flow == "own_prod_add":
-        if "|" not in text:
-            return await send_clean(update, ctx, "Format: Name | user_price | reseller_price", kb_home(shop_id, uid))
-        name, up, rp = [x.strip() for x in text.split("|")]
-        upc = to_cents(up)
-        rpc = to_cents(rp)
-        add_product(shop_id, ctx.user_data["cat_id"], ctx.user_data["sub_id"], name, upc, rpc)
-        ctx.user_data["flow"] = None
-        return await send_clean(update, ctx, "✅ Product added.", kb_home(shop_id, uid))
-
-    # ---------------- Owner add keys ----------------
-    if flow == "own_keys_add":
-        pid = ctx.user_data.get("pid")
-        count = add_keys(shop_id, pid, text.splitlines())
-        ctx.user_data["flow"] = None
-        return await send_clean(update, ctx, f"✅ Added {count} keys.", kb_home(shop_id, uid))
-
-    # ---------------- Owner reply to user ----------------
-    if flow == "own_reply_user":
-        target_uid = ctx.user_data.get("selected_user")
-        try:
-            await ctx.bot.send_message(target_uid, f"📩 Reply from owner:\n\n{text}")
-        except Exception:
-            pass
-        ctx.user_data["flow"] = None
-        return await send_clean(update, ctx, "✅ Reply sent.", kb_home(shop_id, uid))
-
-    # ---------------- Balance edit (owner/admin) ----------------
-    if flow in ("own:bal_add", "own:bal_sub", "own:bal_set"):
-        target_uid = ctx.user_data.get("selected_user")
-        amt = to_cents(text)
-        if amt is None:
-            return await send_clean(update, ctx, "Invalid amount.", kb_home(shop_id, uid))
-
-        if flow == "own:bal_add":
-            add_balance_delta(shop_id, target_uid, amt)
-        elif flow == "own:bal_sub":
-            add_balance_delta(shop_id, target_uid, -amt)
-        else:
-            set_balance_absolute(shop_id, target_uid, amt)
-
-        ctx.user_data["flow"] = None
-        return await send_clean(update, ctx, "✅ Balance updated.", kb_home(shop_id, uid))
-
-    # ---------------- Super admin panel offer ----------------
-    if flow == "sa_offer_edit":
-        set_panel_offer_text(text)
-        ctx.user_data["flow"] = None
-        return await send_clean(update, ctx, "✅ Offer text updated.", kb_home(shop_id, uid))
-
-    return
-
-
-# ===================== PHOTO HANDLER =====================
-async def on_photo(update: Update, ctx):
-    upsert_user(update.effective_user)
-    uid = update.effective_user.id
-    shop_id = ctx.user_data.get("active_shop_id", 1)
-
-    if ctx.user_data.get("flow") != "dep_wait_photo":
-        return
-
-    amt = ctx.user_data.get("dep_amount")
-    if not amt:
-        ctx.user_data["flow"] = None
-        return await send_clean(update, ctx, "Amount missing.", kb_home(shop_id, uid))
-
-    file_id = update.message.photo[-1].file_id
-    caption = update.message.caption or ""
-
-    dep_id = create_deposit(shop_id, uid, amt, file_id, caption)
-    ctx.user_data["flow"] = None
-
-    owner_id = get_shop(shop_id)["owner_id"]
-    try:
-        await ctx.bot.send_photo(
-            owner_id,
-            file_id,
-            caption=f"💳 Deposit #{dep_id}\nUser: {uid}\nAmount: {money(amt)}"
+        return await update.message.reply_text(
+            f"✅ Deposit request submitted: {money(amt)}\n\nAdmin will approve.",
+            reply_markup=kb_home(uid)
         )
-    except Exception:
-        pass
-
-    return await send_clean(update, ctx, f"✅ Deposit submitted (ID #{dep_id})", kb_home(shop_id, uid))
-
 
 # ===================== BOOT =====================
 async def post_init(app):
     init_db()
 
 def main():
-    if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN missing")
-    if SUPER_ADMIN_ID == 0:
-        raise RuntimeError("ADMIN_ID missing")
-
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
-
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(on_cb))
-    app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, on_text))
-
     app.run_polling()
 
 if __name__ == "__main__":
     main()
+
+
+# ===================== ADMIN UI =====================
+def kb_admin():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📦 Products", callback_data="admin:products"),
+            InlineKeyboardButton("💳 Deposits", callback_data="admin:deposits"),
+        ],
+        [
+            InlineKeyboardButton("👥 Users", callback_data="admin:users"),
+        ],
+        [
+            InlineKeyboardButton("⬅ Back", callback_data="home"),
+        ]
+    ])
+
+def kb_admin_back():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅ Back", callback_data="admin:menu")]
+    ])
+
+# ===================== ADMIN CALLBACKS =====================
+async def admin_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    uid = q.from_user.id
+
+    if uid != ADMIN_ID:
+        return await q.answer("Not authorized", show_alert=True)
+
+    data = q.data
+
+    # ADMIN MENU
+    if data == "admin:menu":
+        return await q.edit_message_text(
+            "🛠 Admin Panel",
+            reply_markup=kb_admin()
+        )
+
+    # ================= PRODUCTS =================
+    if data == "admin:products":
+        prods = list_products(active_only=False)
+        btns = []
+        for p in prods:
+            state = "✅" if p["is_active"] else "🚫"
+            btns.append([
+                InlineKeyboardButton(
+                    f"{state} {p['name']} (ID {p['id']})",
+                    callback_data=f"admin:prod:{p['id']}"
+                )
+            ])
+        btns.append([InlineKeyboardButton("➕ Add Product", callback_data="admin:add_product")])
+        btns.append([InlineKeyboardButton("⬅ Back", callback_data="admin:menu")])
+        return await q.edit_message_text(
+            "📦 Products",
+            reply_markup=InlineKeyboardMarkup(btns)
+        )
+
+    if data.startswith("admin:prod:"):
+        pid = int(data.split(":")[2])
+        p = get_product(pid)
+        txt = (
+            f"📦 {p['name']}\n\n"
+            f"Price: {money(p['price_cents'])}\n"
+            f"Stock: {p['stock']}\n"
+            f"Active: {'YES' if p['is_active'] else 'NO'}"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Toggle Active", callback_data=f"admin:toggle:{pid}")],
+            [InlineKeyboardButton("🔑 Add Keys", callback_data=f"admin:addkeys:{pid}")],
+            [InlineKeyboardButton("⬅ Back", callback_data="admin:products")]
+        ])
+        return await q.edit_message_text(txt, reply_markup=kb)
+
+    if data.startswith("admin:toggle:"):
+        pid = int(data.split(":")[2])
+        toggle_product(pid)
+        return await q.answer("Updated")
+
+    if data == "admin:add_product":
+        ctx.user_data["flow"] = "admin_add_product"
+        return await q.edit_message_text(
+            "➕ Add Product\n\nSend format:\nName | Price | Telegram Link",
+            reply_markup=kb_admin_back()
+        )
+
+    # ================= KEYS =================
+    if data.startswith("admin:addkeys:"):
+        pid = int(data.split(":")[2])
+        ctx.user_data["flow"] = "admin_add_keys"
+        ctx.user_data["pid"] = pid
+        return await q.edit_message_text(
+            "🔑 Send keys (one per line):",
+            reply_markup=kb_admin_back()
+        )
+
+    # ================= DEPOSITS =================
+    if data == "admin:deposits":
+        with db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM deposits WHERE status='PENDING'")
+            deps = cur.fetchall()
+
+        if not deps:
+            return await q.edit_message_text("No pending deposits.", reply_markup=kb_admin())
+
+        btns = []
+        for d in deps:
+            btns.append([
+                InlineKeyboardButton(
+                    f"#{d['id']} • User {d['user_id']} • {money(d['amount_cents'])}",
+                    callback_data=f"admin:dep:{d['id']}"
+                )
+            ])
+        btns.append([InlineKeyboardButton("⬅ Back", callback_data="admin:menu")])
+        return await q.edit_message_text(
+            "💳 Pending Deposits",
+            reply_markup=InlineKeyboardMarkup(btns)
+        )
+
+    if data.startswith("admin:dep:"):
+        dep_id = int(data.split(":")[2])
+        with db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM deposits WHERE id=%s", (dep_id,))
+            d = cur.fetchone()
+
+        txt = (
+            f"💳 Deposit #{d['id']}\n\n"
+            f"User: {d['user_id']}\n"
+            f"Amount: {money(d['amount_cents'])}\n"
+            f"Status: {d['status']}"
+        )
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"admin:depok:{dep_id}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"admin:depnok:{dep_id}")
+            ],
+            [InlineKeyboardButton("⬅ Back", callback_data="admin:deposits")]
+        ])
+        return await q.edit_message_text(txt, reply_markup=kb)
+
+    if data.startswith("admin:depok:"):
+        dep_id = int(data.split(":")[2])
+        with db() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM deposits WHERE id=%s", (dep_id,))
+            d = cur.fetchone()
+            cur.execute("UPDATE deposits SET status='APPROVED' WHERE id=%s", (dep_id,))
+            add_balance(d["user_id"], d["amount_cents"])
+            conn.commit()
+        return await q.edit_message_text("✅ Deposit approved.", reply_markup=kb_admin())
+
+    if data.startswith("admin:depnok:"):
+        dep_id = int(data.split(":")[2])
+        with db() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE deposits SET status='REJECTED' WHERE id=%s", (dep_id,))
+            conn.commit()
+        return await q.edit_message_text("❌ Deposit rejected.", reply_markup=kb_admin())
+
+# ===================== ADMIN TEXT FLOWS =====================
+async def admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid != ADMIN_ID:
+        return
+
+    flow = ctx.user_data.get("flow")
+    text = (update.message.text or "").strip()
+
+    # ADD PRODUCT
+    if flow == "admin_add_product":
+        if "|" not in text:
+            return await update.message.reply_text("Format: Name | Price | Telegram Link")
+
+        name, price, link = [x.strip() for x in text.split("|", 2)]
+        cents = to_cents(price)
+        if cents is None:
+            return await update.message.reply_text("Invalid price")
+
+        with db() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+            INSERT INTO products (name, price_cents, telegram_link, is_active)
+            VALUES (%s,%s,%s,1)
+            """, (name, cents, link))
+            conn.commit()
+
+        ctx.user_data.clear()
+        return await update.message.reply_text("✅ Product added.", reply_markup=kb_admin())
+
+    # ADD KEYS
+    if flow == "admin_add_keys":
+        pid = ctx.user_data.get("pid")
+        keys = text.splitlines()
+        with db() as conn:
+            cur = conn.cursor()
+            for k in keys:
+                cur.execute(
+                    "INSERT INTO keys (product_id, key_text, is_used) VALUES (%s,%s,0)",
+                    (pid, k.strip())
+                )
+            conn.commit()
+        ctx.user_data.clear()
+        return await update.message.reply_text("✅ Keys added.", reply_markup=kb_admin())
+
+# ===================== REGISTER ADMIN HANDLERS =====================
+app.add_handler(CallbackQueryHandler(admin_cb, pattern="^admin"))
+app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, admin_text))
+
+
