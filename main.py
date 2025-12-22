@@ -234,14 +234,17 @@ def init_db():
             """, (SUPER_ADMIN_ID, DEFAULT_MAIN_SHOP_NAME, DEFAULT_MAIN_WELCOME, None, None, now_iso(),
                   (PLATFORM_USDT_TRC20_ADDRESS or None)))
 
-        # Force main shop owner to current SUPER_ADMIN_ID (fixes missing Admin Panel)
+       # Force main shop owner to current SUPER_ADMIN_ID
 conn.execute("UPDATE shops SET owner_id=? WHERE id=1", (SUPER_ADMIN_ID,))
 
-        # Ensure platform wallet set if env provided
-        if PLATFORM_USDT_TRC20_ADDRESS:
-            conn.execute("UPDATE shops SET wallet_address=? WHERE id=1", (PLATFORM_USDT_TRC20_ADDRESS,))
+# Ensure platform wallet set if env
+if PLATFORM_USDT_TRC20_ADDRESS:
+    conn.execute(
+        "UPDATE shops SET wallet_address=? WHERE id=1",
+        (PLATFORM_USDT_TRC20_ADDRESS,)
+    )
 
-        if not conn.execute("SELECT 1 FROM settings WHERE key='seller_offer'").fetchone():
+if not conn.execute("SELECT 1 FROM settings WHERE key='seller_offer'").fetchone():
             conn.execute(
                 "INSERT INTO settings(key,value) VALUES(?,?)",
                 ("seller_offer",
