@@ -94,167 +94,145 @@ def _col_exists(conn: sqlite3.Connection, table: str, col: str) -> bool:
 
 def init_db():
     with db() as conn:
+        # SETTINGS
         conn.execute("""
-        CREATE TABLE IF NOT EXISTS settings(
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
+            CREATE TABLE IF NOT EXISTS settings(
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
         """)
 
+        # SHOPS
         conn.execute("""
-        CREATE TABLE IF NOT EXISTS shops(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            owner_id INTEGER NOT NULL,
-            shop_name TEXT NOT NULL,
-            welcome_text TEXT NOT NULL,
-            welcome_media_file_id TEXT,
-            welcome_media_type TEXT, -- photo/video
-            panel_until TEXT,
-            is_suspended INTEGER NOT NULL DEFAULT 0,
-            suspended_reason TEXT,
-            suspend_until TEXT,
-            created_at TEXT NOT NULL,
-            wallet_address TEXT
-        )
+            CREATE TABLE IF NOT EXISTS shops(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner_id INTEGER NOT NULL,
+                shop_name TEXT NOT NULL,
+                welcome_text TEXT NOT NULL,
+                welcome_media_file_id TEXT,
+                welcome_media_type TEXT,
+                panel_until TEXT,
+                is_suspended INTEGER NOT NULL DEFAULT 0,
+                suspended_reason TEXT,
+                suspend_until TEXT,
+                created_at TEXT NOT NULL,
+                wallet_address TEXT
+            )
         """)
 
+        # USERS
         conn.execute("""
-        CREATE TABLE IF NOT EXISTS users(
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            last_bot_msg_id INTEGER,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            owner_banned INTEGER NOT NULL DEFAULT 0,
-            owner_restrict_until TEXT,
-            owner_block_reason TEXT
-        )
+            CREATE TABLE IF NOT EXISTS users(
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                created_at TEXT NOT NULL
+            )
         """)
 
+        # WALLETS
         conn.execute("""
-        CREATE TABLE IF NOT EXISTS shop_users(
-            shop_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            balance_cents INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY(shop_id, user_id)
-        )
+            CREATE TABLE IF NOT EXISTS wallets(
+                shop_id INTEGER,
+                user_id INTEGER,
+                balance_cents INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (shop_id, user_id)
+            )
         """)
 
+        # PRODUCTS
         conn.execute("""
-        CREATE TABLE IF NOT EXISTS categories(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            shop_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1
-        )
+            CREATE TABLE IF NOT EXISTS products(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                shop_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                price_cents INTEGER NOT NULL,
+                telegram_link TEXT,
+                created_at TEXT NOT NULL
+            )
         """)
 
+        # ORDERS
         conn.execute("""
-        CREATE TABLE IF NOT EXISTS subcategories(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            shop_id INTEGER NOT NULL,
-            category_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            is_active INTEGER NOT NULL DEFAULT 1
-        )
+            CREATE TABLE IF NOT EXISTS orders(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                shop_id INTEGER,
+                user_id INTEGER,
+                product_id INTEGER,
+                key_text TEXT,
+                created_at TEXT NOT NULL
+            )
         """)
 
+        # SUPPORT
         conn.execute("""
-        CREATE TABLE IF NOT EXISTS products(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            shop_id INTEGER NOT NULL,
-            category_id INTEGER NOT NULL,
-            subcategory_id INTEGER NOT NULL,
-            name TEXT NOT NULL,
-            user_price_cents INTEGER NOT NULL,
-            telegram_link TEXT,
-            is_active INTEGER NOT NULL DEFAULT 1
-        )
+            CREATE TABLE IF NOT EXISTS support(
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                shop_id INTEGER,
+                user_id INTEGER,
+                message TEXT,
+                created_at TEXT NOT NULL
+            )
         """)
 
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS keys(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            shop_id INTEGER NOT NULL,
-            product_id INTEGER NOT NULL,
-            key_text TEXT NOT NULL,
-            is_used INTEGER NOT NULL DEFAULT 0,
-            used_by INTEGER,
-            used_at TEXT
-        )
-        """)
+        # ===============================
+        # ENSURE MAIN SHOP
+        # ===============================
+        r = conn.execute(
+            "SELECT id FROM shops ORDER BY id ASC LIMIT 1"
+        ).fetchone()
 
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS purchases(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            shop_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            product_id INTEGER NOT NULL,
-            product_name TEXT NOT NULL,
-            price_cents INTEGER NOT NULL,
-            key_text TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-        """)
-
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS deposits(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            shop_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            amount_cents INTEGER NOT NULL,
-            photo_file_id TEXT NOT NULL,
-            caption TEXT,
-            status TEXT NOT NULL,            -- PENDING/APPROVED/REJECTED
-            created_at TEXT NOT NULL,
-            reviewed_at TEXT,
-            reviewed_by INTEGER
-        )
-        """)
-
-        conn.execute("""
-        CREATE TABLE IF NOT EXISTS support_msgs(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            shop_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            text TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-        """)
-
-        # Ensure main shop exists with id=1
-        r = conn.execute("SELECT id FROM shops ORDER BY id ASC LIMIT 1").fetchone()
         if not r:
             conn.execute("""
-            INSERT INTO shops(owner_id, shop_name, welcome_text, welcome_media_file_id, welcome_media_type,
-                              panel_until, is_suspended, suspended_reason, suspend_until, created_at, wallet_address)
-            VALUES(?,?,?,?,?,NULL,0,NULL,NULL,?,?)
-            """, (SUPER_ADMIN_ID, DEFAULT_MAIN_SHOP_NAME, DEFAULT_MAIN_WELCOME, None, None, now_iso(),
-                  (PLATFORM_USDT_TRC20_ADDRESS or None)))
+                INSERT INTO shops(
+                    owner_id, shop_name, welcome_text,
+                    welcome_media_file_id, welcome_media_type,
+                    panel_until, is_suspended, suspended_reason,
+                    suspend_until, created_at, wallet_address
+                )
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                SUPER_ADMIN_ID,
+                DEFAULT_MAIN_SHOP_NAME,
+                DEFAULT_MAIN_WELCOME,
+                None,
+                None,
+                None,
+                0,
+                None,
+                None,
+                now_iso(),
+                PLATFORM_USDT_TRC20_ADDRESS or None
+            ))
 
-       # Force main shop owner to current SUPER_ADMIN_ID
-conn.execute("UPDATE shops SET owner_id=? WHERE id=1", (SUPER_ADMIN_ID,))
+        # FORCE MAIN SHOP OWNER
+        conn.execute(
+            "UPDATE shops SET owner_id=? WHERE id=1",
+            (SUPER_ADMIN_ID,)
+        )
 
-# Ensure platform wallet set if env
-if PLATFORM_USDT_TRC20_ADDRESS:
-    conn.execute(
-        "UPDATE shops SET wallet_address=? WHERE id=1",
-        (PLATFORM_USDT_TRC20_ADDRESS,)
-    )
+        # PLATFORM WALLET
+        if PLATFORM_USDT_TRC20_ADDRESS:
+            conn.execute(
+                "UPDATE shops SET wallet_address=? WHERE id=1",
+                (PLATFORM_USDT_TRC20_ADDRESS,)
+            )
 
-if not conn.execute("SELECT 1 FROM settings WHERE key='seller_offer'").fetchone():
+        # SELLER OFFER TEXT
+        if not conn.execute(
+            "SELECT 1 FROM settings WHERE key='seller_offer'"
+        ).fetchone():
             conn.execute(
                 "INSERT INTO settings(key,value) VALUES(?,?)",
-                ("seller_offer",
-                 "⭐ Become a Seller ($10/month)\n\n"
-                 "• Your own store inside the bot\n"
-                 "• Your own wallet address\n"
-                 "• Your own admin panel\n"
-                 "• Your own categories / products / keys\n\n"
-                 "Subscription adds 30 days each purchase.\n"
-                 "If expired, seller admin panel is locked until renewed.")
+                (
+                    "seller_offer",
+                    "⭐ Become a Seller ($10/month)\n"
+                    "• Your own store\n"
+                    "• Your own wallet\n"
+                    "• Your own admin panel\n"
+                    "• Your own categories & products\n"
+                    "• Subscription adds 30 days\n"
+                    "• If expired, seller admin is locked"
+                )
             )
 
 # ===================== USERS =====================
