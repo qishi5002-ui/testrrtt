@@ -234,6 +234,9 @@ def init_db():
             """, (SUPER_ADMIN_ID, DEFAULT_MAIN_SHOP_NAME, DEFAULT_MAIN_WELCOME, None, None, now_iso(),
                   (PLATFORM_USDT_TRC20_ADDRESS or None)))
 
+        # Force main shop owner to current SUPER_ADMIN_ID (fixes missing Admin Panel)
+conn.execute("UPDATE shops SET owner_id=? WHERE id=1", (SUPER_ADMIN_ID,))
+
         # Ensure platform wallet set if env provided
         if PLATFORM_USDT_TRC20_ADDRESS:
             conn.execute("UPDATE shops SET wallet_address=? WHERE id=1", (PLATFORM_USDT_TRC20_ADDRESS,))
