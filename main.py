@@ -1892,6 +1892,9 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     return
 
+# SAFETY ALIAS (prevents NameError)
+on_callback = on_cb
+
 # ============================================================
 # TEXT HANDLER + PHOTO HANDLER + BOOT (Part 3/3)
 # ============================================================
@@ -2313,7 +2316,7 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CallbackQueryHandler(on_cb))
+    app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, on_text))
 
