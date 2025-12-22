@@ -893,7 +893,7 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CallbackQueryHandler(on_cb))  # defined in Part 2
+    app.add_handler(CallbackQueryHandler(on_callback))  # defined in Part 2
     app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, on_photo))  # defined in Part 3
     app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, on_text))   # defined in Part 3
 
