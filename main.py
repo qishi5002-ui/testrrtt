@@ -81,17 +81,9 @@ FLOW_USERS_SEARCH = "flow_users_search"
 FLOW_SELLERS_SEARCH = "flow_sellers_search"
 
 FLOW_CAT_ADD = "flow_cat_add"
-FLOW_COCAT_PICK_CAT = "flow_cocat_pick_cat"
 FLOW_COCAT_NAME = "flow_cocat_name"
-
-FLOW_PROD_PICK_CAT = "flow_prod_pick_cat"
-FLOW_PROD_PICK_COCAT = "flow_prod_pick_cocat"
 FLOW_PROD_DETAILS = "flow_prod_details"
-
-FLOW_DELIVERY_PICK_PROD = "flow_delivery_pick_prod"
 FLOW_DELIVERY_TEXT = "flow_delivery_text"
-
-FLOW_PROD_DEL_PICK = "flow_prod_del_pick"
 
 # ============================================================
 # HELPERS
@@ -662,10 +654,6 @@ def create_deposit_request(user_id: int, shop_owner_id: int, amount: float, proo
     conn.commit()
     return int(cur.lastrowid)
 
-def get_deposit(dep_id: int) -> Optional[sqlite3.Row]:
-    cur.execute("SELECT * FROM deposit_requests WHERE dep_id=?", (dep_id,))
-    return cur.fetchone()
-
 def approve_deposit(dep_id: int, actor_id: int) -> Optional[int]:
     cur.execute("SELECT * FROM deposit_requests WHERE dep_id=? AND status='pending'", (dep_id,))
     d = cur.fetchone()
@@ -783,13 +771,6 @@ def kb_delivery_buttons(owner_id: int, product_id: int, has_link: bool) -> Inlin
     rows.append([InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")])
     return InlineKeyboardMarkup(rows)
 
-def kb_wallet(show_back_to_shop: bool) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton("➕ Request Deposit", callback_data="DEP_START")]]
-    if show_back_to_shop:
-        rows.append([InlineKeyboardButton("⬅️ Back to Shop", callback_data=f"OPEN_SHOP:{OWNER_MAIN}")])
-    rows.append([InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")])
-    return InlineKeyboardMarkup(rows)
-
 def kb_support_draft() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Done", callback_data="SUPPORT_DONE"),
@@ -858,8 +839,8 @@ def kb_seller_list(sellers: List[sqlite3.Row]) -> InlineKeyboardMarkup:
     for s in sellers[:30]:
         uname = (s["username"] or "").strip()
         label = f"@{uname}" if uname else f"NoUsername — {s['seller_id']}"
-        days = days_left(int(s["sub_until_ts"]))
-        rows.append([InlineKeyboardButton(f"{label} (days {days})", callback_data=f"SELLER_VIEW:{s['seller_id']}")])
+        d = days_left(int(s["sub_until_ts"]))
+        rows.append([InlineKeyboardButton(f"{label} (days {d})", callback_data=f"SELLER_VIEW:{s['seller_id']}")])
     rows.append([InlineKeyboardButton("🔎 Search", callback_data="SELLER_SEARCH")])
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="ADMIN_PANEL"),
                  InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")])
@@ -917,9 +898,6 @@ def set_support_target(uid: int, target: int):
     conn.commit()
 
 def resolve_wallet_for_context(uid: int, context: ContextTypes.DEFAULT_TYPE) -> Tuple[int, str, str]:
-    """
-    If user is in seller shop context => wallet should show seller wallet (if set) else main.
-    """
     shop_owner = current_shop_owner(context)
     if shop_owner != OWNER_MAIN:
         s = get_seller(shop_owner)
@@ -965,11 +943,9 @@ async def do_buy(uid: int, context: ContextTypes.DEFAULT_TYPE, owner_id: int, pr
 
     add_balance(uid, -price, uid, "purchase", p["name"])
 
-    # seller revenue if seller shop
     if owner_id != OWNER_MAIN:
         add_balance(owner_id, +price, uid, "sale", f"{p['name']}")
 
-    # notify seller + superadmin
     buyer = f"@{u['username']}" if (u["username"] or "").strip() else str(uid)
     await notify_owner_and_superadmin(context, owner_id, f"🛒 Purchase\nShop: {owner_id}\nBuyer: {buyer}\nProduct: {p['name']}\nAmount: {fmt_money(price)}")
 
@@ -996,7 +972,7 @@ async def do_getfile(uid: int, context: ContextTypes.DEFAULT_TYPE, owner_id: int
     await context.bot.send_message(uid, f"📁 File Link:\n{link}")
 
 # ============================================================
-# SUPPORT DRAFT SEND
+# SUPPORT SEND
 # ============================================================
 async def support_send(uid: int, context: ContextTypes.DEFAULT_TYPE, text: str):
     u = get_user(uid)
@@ -1009,9 +985,9 @@ async def support_send(uid: int, context: ContextTypes.DEFAULT_TYPE, text: str):
         tid = create_ticket(uid, target)
     add_ticket_message(tid, uid, text)
 
-    # notify target + superadmin
     sender = f"@{u['username']}" if (u and (u["username"] or "").strip()) else str(uid)
-    await notify_owner_and_superadmin(context, target if target != SUPER_ADMIN_ID else OWNER_MAIN, f"🆘 Support Ticket #{tid}\nFrom: {sender}\nTo: {target}\n\n{text[:1200]}")
+    await notify_owner_and_superadmin(context, target if target != SUPER_ADMIN_ID else OWNER_MAIN,
+                                      f"🆘 Support Ticket #{tid}\nFrom: {sender}\nTo: {target}\n\n{text[:1200]}")
 
 # ============================================================
 # SELLER SHARE LINK
@@ -1038,7 +1014,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     ensure_user(uid, update.effective_user.username or "")
 
-    # deep link: shop_{sellerid}
     if context.args and context.args[0].startswith("shop_"):
         try:
             sid = int(context.args[0].split("_", 1)[1])
@@ -1048,7 +1023,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    # default home
     reset_flow(context)
     context.user_data[CTX_SHOP_OWNER] = OWNER_MAIN
     w = get_welcome(WELCOME_SELLER_MAIN if is_active_seller(uid) else WELCOME_PUBLIC)
@@ -1065,7 +1039,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = q.data
 
     # MAIN_MENU behavior:
-    # - if user is in seller shop context and NOT the shop owner and NOT superadmin => return to seller shop home (not your shop)
+    # seller-shop users stay inside seller shop
     if data == "MAIN_MENU":
         reset_flow(context)
         shop_owner = current_shop_owner(context)
@@ -1073,7 +1047,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await safe_delete(q.message)
             await open_shop(update, context, shop_owner)
             return
-        # otherwise go to main home
         await safe_delete(q.message)
         await start(update, context)
         return
@@ -1084,7 +1057,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await open_shop(update, context, OWNER_MAIN)
         return
 
-    # USER MENU
     if data == "U_PRODUCTS":
         reset_flow(context)
         await send_or_edit(update, context, "Choose a shop:", kb_shop_picker())
@@ -1099,7 +1071,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "SELLER_SHOPS":
         reset_flow(context)
-        # show list immediately
         sellers = list_sellers(30)
         rows: List[List[InlineKeyboardButton]] = []
         for s in sellers:
@@ -1114,13 +1085,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "SELLER_SEARCH":
         reset_flow(context)
         context.user_data[CTX_FLOW] = FLOW_SELLERS_SEARCH
-        await send_or_edit(update, context, "Send seller username to search (no @).", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+        await send_or_edit(update, context, "Send seller username to search (no @).",
+                           InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
         return
 
-    # WALLET
     if data == "U_WALLET":
         reset_flow(context)
-        shop_owner_id, addr, msg = resolve_wallet_for_context(uid, context)
+        _, addr, msg = resolve_wallet_for_context(uid, context)
         u = get_user(uid)
         text = (
             f"💰 Wallet\n\n"
@@ -1137,24 +1108,24 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "DEP_START":
         reset_flow(context)
         shop_owner = current_shop_owner(context)
-        # deposit should go to seller if in seller shop, else main
         context.user_data[CTX_FLOW] = FLOW_DEPOSIT
         context.user_data[FLOW_DEPOSIT] = {"step": "amount", "shop_owner_id": shop_owner}
-        await send_or_edit(update, context, "Enter deposit amount (numbers only):", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+        await send_or_edit(update, context, "Enter deposit amount (numbers only):",
+                           InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
         return
 
-    # HISTORY
     if data == "U_HISTORY":
         reset_flow(context)
-        await send_or_edit(update, context, format_history(uid), InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+        await send_or_edit(update, context, format_history(uid),
+                           InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
         return
 
-    # SUPPORT
     if data == "U_SUPPORT":
         reset_flow(context)
         context.user_data[CTX_FLOW] = FLOW_SUPPORT_DRAFT
         context.user_data[FLOW_SUPPORT_DRAFT] = {"draft": ""}
-        await send_or_edit(update, context, "✉️ Type your message (send multiple texts). Press DONE to send.", kb_support_draft())
+        await send_or_edit(update, context, "✉️ Type your message (send multiple texts). Press DONE to send.",
+                           kb_support_draft())
         return
 
     if data == "SUPPORT_DONE":
@@ -1167,10 +1138,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await support_send(uid, context, draft)
         reset_flow(context)
-        await send_or_edit(update, context, "✅ Support message sent.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+        await send_or_edit(update, context, "✅ Support message sent.",
+                           InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
         return
 
-    # BECOME SELLER
     if data == "U_BECOME_SELLER":
         reset_flow(context)
         await send_or_edit(update, context, "⭐ Become Seller", kb_become_seller())
@@ -1179,14 +1150,15 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "SUB_PAY":
         u = get_user(uid)
         if float(u["balance"]) < SELLER_SUB_PRICE:
-            await send_or_edit(update, context, f"❌ Not enough balance.\nPrice: {fmt_money(SELLER_SUB_PRICE)}\nYour balance: {fmt_money(float(u['balance']))}", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+            await send_or_edit(update, context,
+                               f"❌ Not enough balance.\nPrice: {fmt_money(SELLER_SUB_PRICE)}\nYour balance: {fmt_money(float(u['balance']))}",
+                               InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
             return
         add_balance(uid, -SELLER_SUB_PRICE, uid, "sub", f"{SELLER_SUB_DAYS} days")
         new_until = add_seller_subscription(uid, SELLER_SUB_DAYS)
         await send_or_edit(update, context, f"✅ Seller activated!\nDays left: {days_left(new_until)}", kb_main_home(uid))
         return
 
-    # SHOP NAV
     if data.startswith("SHOP_CATS:"):
         owner_id = int(data.split(":", 1)[1])
         cats = list_categories(owner_id)
@@ -1212,7 +1184,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner_id, pid = int(owner_id), int(pid)
         p = get_product(owner_id, pid)
         if not p:
-            await send_or_edit(update, context, "❌ Product not found.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+            await send_or_edit(update, context, "❌ Product not found.",
+                               InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
             return
         text = (
             f"🛒 {p['name']}\n\n"
@@ -1232,31 +1205,28 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await do_getfile(uid, context, int(owner_id), int(pid))
         return
 
-    # ADMIN PANEL (unified)
     if data == "ADMIN_PANEL":
         reset_flow(context)
-        # seller or admin or superadmin
         if not (is_admin(uid) or is_active_seller(uid)):
             await q.answer("Not allowed", show_alert=True)
             return
         await send_or_edit(update, context, "🛠 Admin Panel", kb_admin_panel(uid))
         return
 
-    # Manage Shop
     if data == "M_SHOP":
         reset_flow(context)
         owner = uid if is_active_seller(uid) else OWNER_MAIN
         if is_superadmin(uid):
-            owner = OWNER_MAIN  # superadmin manages main shop here
+            owner = OWNER_MAIN
         await send_or_edit(update, context, "🛒 Manage Shop", kb_shop_manage(owner))
         return
 
-    # Deposits inbox (button list is pushed by notifications already; this shows pending list)
     if data == "M_DEPOSITS":
         reset_flow(context)
         owner = uid if is_active_seller(uid) else OWNER_MAIN
         if is_superadmin(uid) or is_admin(uid):
             owner = OWNER_MAIN
+
         cur.execute("""
             SELECT d.dep_id, d.user_id, u.username, d.amount, d.proof_file_id
             FROM deposit_requests d
@@ -1267,14 +1237,18 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """, (owner,))
         deps = cur.fetchall()
         if not deps:
-            await send_or_edit(update, context, "No pending deposits.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+            await send_or_edit(update, context, "No pending deposits.",
+                               InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
             return
+
         for d in deps:
             uname = (d["username"] or "").strip()
             label = f"@{uname}" if uname else str(d["user_id"])
             caption = f"💳 Deposit Request\nUser: {label}\nAmount: {fmt_money(float(d['amount']))}\nDepID: {d['dep_id']}"
             await context.bot.send_photo(uid, d["proof_file_id"], caption=caption, reply_markup=kb_deposit_actions(int(d["dep_id"])))
-        await send_or_edit(update, context, "⬆️ Sent pending deposits above.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+
+        await send_or_edit(update, context, "⬆️ Sent pending deposits above.",
+                           InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
         return
 
     if data.startswith("DEP_OK:"):
@@ -1303,7 +1277,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Not found", show_alert=True)
         return
 
-    # Tickets inbox
     if data == "M_TICKETS":
         reset_flow(context)
         receiver = uid if is_active_seller(uid) else SUPER_ADMIN_ID
@@ -1311,7 +1284,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             receiver = SUPER_ADMIN_ID
         tickets = list_tickets_for(receiver)
         if not tickets:
-            await send_or_edit(update, context, "No open tickets.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+            await send_or_edit(update, context, "No open tickets.",
+                               InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
             return
         await send_or_edit(update, context, "🆘 Tickets:", kb_ticket_list(tickets))
         return
@@ -1320,10 +1294,10 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tid = int(data.split(":", 1)[1])
         t = get_ticket(tid)
         if not t:
-            await send_or_edit(update, context, "Ticket not found.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+            await send_or_edit(update, context, "Ticket not found.",
+                               InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
             return
 
-        # permission: seller can see tickets to themselves, admin/superadmin can see superadmin tickets
         if int(t["to_id"]) != uid and not is_admin(uid) and not is_superadmin(uid):
             await q.answer("Not allowed", show_alert=True)
             return
@@ -1346,7 +1320,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("TICKET_CLOSE:"):
         tid = int(data.split(":", 1)[1])
         close_ticket(tid)
-        await send_or_edit(update, context, f"✅ Closed ticket #{tid}.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+        await send_or_edit(update, context, f"✅ Closed ticket #{tid}.",
+                           InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
         return
 
     if data.startswith("TICKET_REPLY:"):
@@ -1382,22 +1357,16 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         reset_flow(context)
-        await send_or_edit(update, context, "✅ Reply sent.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+        await send_or_edit(update, context, "✅ Reply sent.",
+                           InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
         return
 
-    # Users list (seller scope or all)
     if data == "M_USERS":
         reset_flow(context)
-        # seller sees seller-scope users; superadmin sees all
-        shop_owner = uid if is_active_seller(uid) else OWNER_MAIN
-        if is_superadmin(uid):
-            shop_owner = OWNER_MAIN
-
         if is_superadmin(uid):
             users = list_users(30)
             await send_or_edit(update, context, "👥 Users (ALL)", kb_user_list(users, is_seller_scope=False))
         else:
-            # seller-scope = users who used support target to this seller or made deposits to seller shop (simple + reliable)
             cur.execute("""
                 SELECT DISTINCT u.user_id, u.username, u.balance, u.created_ts
                 FROM users u
@@ -1414,17 +1383,18 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reset_flow(context)
         context.user_data[CTX_FLOW] = FLOW_USERS_SEARCH
         context.user_data[FLOW_USERS_SEARCH] = {"mode": data}
-        await send_or_edit(update, context, "Send username to search (no @).", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+        await send_or_edit(update, context, "Send username to search (no @).",
+                           InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
         return
 
     if data.startswith("USER_VIEW:"):
         target_uid = int(data.split(":", 1)[1])
         tu = get_user(target_uid)
         if not tu:
-            await send_or_edit(update, context, "User not found.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+            await send_or_edit(update, context, "User not found.",
+                               InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
             return
 
-        # permissions: superadmin any; seller only if in their scope (same query check)
         if not is_superadmin(uid) and is_active_seller(uid):
             cur.execute("""
                 SELECT 1
@@ -1459,7 +1429,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("Not allowed", show_alert=True)
             return
 
-        # sellers can only edit within their scope
         if is_active_seller(uid) and not (is_superadmin(uid) or is_admin(uid)):
             cur.execute("""
                 SELECT 1
@@ -1481,7 +1450,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tu = get_user(target_uid)
         uname = (tu["username"] or "").strip()
         label = f"@{uname}" if uname else str(target_uid)
-        await send_or_edit(update, context, f"✅ Updated {label}\nNew balance: {fmt_money(float(tu['balance']))}", kb_user_actions(target_uid))
+        await send_or_edit(update, context, f"✅ Updated {label}\nNew balance: {fmt_money(float(tu['balance']))}",
+                           kb_user_actions(target_uid))
         return
 
     if data.startswith("USER_HIST:"):
@@ -1489,11 +1459,13 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not (is_superadmin(uid) or is_admin(uid) or is_active_seller(uid)):
             await q.answer("Not allowed", show_alert=True)
             return
-        await send_or_edit(update, context, format_history(target_uid), InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"USER_VIEW:{target_uid}")],
-                                                                                             [InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+        await send_or_edit(update, context, format_history(target_uid),
+                           InlineKeyboardMarkup([
+                               [InlineKeyboardButton("⬅️ Back", callback_data=f"USER_VIEW:{target_uid}")],
+                               [InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]
+                           ]))
         return
 
-    # Sellers list (superadmin only)
     if data == "M_SELLERS":
         reset_flow(context)
         if not is_superadmin(uid):
@@ -1511,7 +1483,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         su = get_user(sid)
         ss = get_seller(sid)
         if not su or not ss:
-            await send_or_edit(update, context, "Seller not found.", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+            await send_or_edit(update, context, "Seller not found.",
+                               InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
             return
         uname = (su["username"] or "").strip()
         label = f"@{uname}" if uname else "NoUsername"
@@ -1532,7 +1505,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sid, dd = int(sid), int(dd)
         new_until = add_seller_subscription(sid, dd)
         await q.answer("Added")
-        await send_or_edit(update, context, f"✅ Updated seller {sid}\nDays left: {days_left(new_until)}", kb_seller_actions(sid, int(get_seller(sid)["banned"])))
+        await send_or_edit(update, context, f"✅ Updated seller {sid}\nDays left: {days_left(new_until)}",
+                           kb_seller_actions(sid, int(get_seller(sid)["banned"])))
         return
 
     if data.startswith("SA_BAN:"):
@@ -1559,15 +1533,15 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_or_edit(update, context, f"✅ Unbanned seller {sid}", kb_seller_actions(sid, 0))
         return
 
-    # Admin settings
     if data == "M_SET_WALLET":
         reset_flow(context)
-        # seller edits own wallet; admin/superadmin edits main wallet address via ENV only (we keep address env); but seller wallet editable here
         if is_active_seller(uid):
             context.user_data[CTX_FLOW] = FLOW_SET_WALLET_ADDR
-            await send_or_edit(update, context, "Send your wallet address (any format).", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+            await send_or_edit(update, context, "Send your wallet address (any format).",
+                               InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
         else:
-            await send_or_edit(update, context, "Main shop wallet address is set by ENV (USDT_TRC20).", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+            await send_or_edit(update, context, "Main shop wallet address is set by ENV (USDT_TRC20).",
+                               InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
         return
 
     if data == "M_EDIT_WALLETMSG":
@@ -1577,7 +1551,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             owner_id = OWNER_MAIN
         context.user_data[CTX_FLOW] = FLOW_EDIT_WALLETMSG
         context.user_data[FLOW_EDIT_WALLETMSG] = {"owner_id": owner_id}
-        await send_or_edit(update, context, "Send the new wallet message (text).", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+        await send_or_edit(update, context, "Send the new wallet message (text).",
+                           InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
         return
 
     if data == "M_EDIT_WELCOME":
@@ -1587,7 +1562,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             owner_id = WELCOME_PUBLIC
         context.user_data[CTX_FLOW] = FLOW_EDIT_WELCOME
         context.user_data[FLOW_EDIT_WELCOME] = {"owner_id": owner_id}
-        await send_or_edit(update, context, "Send welcome as:\n- Text OR\n- Photo/Video with caption\n\n(Next message will be saved.)", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+        await send_or_edit(update, context, "Send welcome as:\n- Text OR\n- Photo/Video with caption\n\n(Next message will be saved.)",
+                           InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
         return
 
     if data == "M_SHARE":
@@ -1598,7 +1574,6 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_share_my_shop(uid, context)
         return
 
-    # Manage shop actions (button-based)
     if data.startswith("CAT_ADD:"):
         reset_flow(context)
         owner = int(data.split(":", 1)[1])
@@ -1607,19 +1582,18 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         context.user_data[CTX_FLOW] = FLOW_CAT_ADD
         context.user_data[FLOW_CAT_ADD] = {"owner_id": owner}
-        await send_or_edit(update, context, "Send category as:\nName | optional description", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+        await send_or_edit(update, context, "Send category as:\nName | optional description",
+                           InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
         return
 
     if data.startswith("COCAT_ADD:"):
         reset_flow(context)
         owner = int(data.split(":", 1)[1])
-        if owner != OWNER_MAIN and owner != uid and not is_superadmin(uid):
-            await q.answer("Not allowed", show_alert=True)
-            return
         cats = list_categories(owner)
         if not cats:
-            await send_or_edit(update, context, "No categories yet. Add a category first.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="M_SHOP")],
-                                                                                                                [InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+            await send_or_edit(update, context, "No categories yet. Add a category first.",
+                               InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="M_SHOP")],
+                                                     [InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
             return
         rows = [[InlineKeyboardButton(c["name"], callback_data=f"COCAT_PICK:{owner}:{c['name']}")] for c in cats[:25]]
         rows.append([InlineKeyboardButton("⬅️ Back", callback_data="M_SHOP"),
@@ -1633,7 +1607,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reset_flow(context)
         context.user_data[CTX_FLOW] = FLOW_COCAT_NAME
         context.user_data[FLOW_COCAT_NAME] = {"owner_id": owner, "category": cat}
-        await send_or_edit(update, context, f"Send co-category name for:\n{cat}\n\nFormat:\nName | optional description", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+        await send_or_edit(update, context, f"Send co-category name for:\n{cat}\n\nFormat:\nName | optional description",
+                           InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
         return
 
     if data.startswith("PROD_ADD:"):
@@ -1641,8 +1616,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner = int(data.split(":", 1)[1])
         cats = list_categories(owner)
         if not cats:
-            await send_or_edit(update, context, "No categories yet. Add a category first.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="M_SHOP")],
-                                                                                                                [InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+            await send_or_edit(update, context, "No categories yet. Add a category first.",
+                               InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="M_SHOP")],
+                                                     [InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
             return
         rows = [[InlineKeyboardButton(c["name"], callback_data=f"PROD_PICK_CAT:{owner}:{c['name']}")] for c in cats[:25]]
         rows.append([InlineKeyboardButton("⬅️ Back", callback_data="M_SHOP"),
@@ -1655,8 +1631,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner = int(owner)
         cocats = list_cocategories(owner, cat)
         if not cocats:
-            await send_or_edit(update, context, "No co-categories yet. Add one first.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"PROD_ADD:{owner}")],
-                                                                                                              [InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+            await send_or_edit(update, context, "No co-categories yet. Add one first.",
+                               InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=f"PROD_ADD:{owner}")],
+                                                     [InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
             return
         rows = [[InlineKeyboardButton(cc["name"], callback_data=f"PROD_PICK_COCAT:{owner}:{cat}:{cc['name']}")] for cc in cocats[:25]]
         rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"PROD_ADD:{owner}"),
@@ -1670,7 +1647,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reset_flow(context)
         context.user_data[CTX_FLOW] = FLOW_PROD_DETAILS
         context.user_data[FLOW_PROD_DETAILS] = {"owner_id": owner, "category": cat, "cocat": cocat}
-        await send_or_edit(update, context, "Send product details:\nName | Price | optional description", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+        await send_or_edit(update, context, "Send product details:\nName | Price | optional description",
+                           InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
         return
 
     if data.startswith("DELIVERY_SET:"):
@@ -1678,8 +1656,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner = int(data.split(":", 1)[1])
         prods = list_all_products(owner, 30)
         if not prods:
-            await send_or_edit(update, context, "No products yet.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="M_SHOP")],
-                                                                                          [InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+            await send_or_edit(update, context, "No products yet.",
+                               InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="M_SHOP")],
+                                                     [InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
             return
         rows = [[InlineKeyboardButton(f"{p['name']} (#{p['product_id']})", callback_data=f"DEL_PICK:{owner}:{p['product_id']}")] for p in prods[:30]]
         rows.append([InlineKeyboardButton("⬅️ Back", callback_data="M_SHOP"),
@@ -1693,7 +1672,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reset_flow(context)
         context.user_data[CTX_FLOW] = FLOW_DELIVERY_TEXT
         context.user_data[FLOW_DELIVERY_TEXT] = {"owner_id": owner, "product_id": pid}
-        await send_or_edit(update, context, "Send delivery as:\nKey text | Telegram link", InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+        await send_or_edit(update, context, "Send delivery as:\nKey text | Telegram link",
+                           InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
         return
 
     if data.startswith("PROD_DEL:"):
@@ -1701,8 +1681,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         owner = int(data.split(":", 1)[1])
         prods = list_all_products(owner, 30)
         if not prods:
-            await send_or_edit(update, context, "No products to remove.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="M_SHOP")],
-                                                                                               [InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+            await send_or_edit(update, context, "No products to remove.",
+                               InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="M_SHOP")],
+                                                     [InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
             return
         rows = [[InlineKeyboardButton(f"🗑 {p['name']} (#{p['product_id']})", callback_data=f"PROD_DEL_DO:{owner}:{p['product_id']}")] for p in prods[:30]]
         rows.append([InlineKeyboardButton("⬅️ Back", callback_data="M_SHOP"),
@@ -1714,8 +1695,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, owner, pid = data.split(":", 2)
         owner = int(owner); pid = int(pid)
         deactivate_product(owner, pid)
-        await send_or_edit(update, context, "✅ Product removed.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="M_SHOP")],
-                                                                                        [InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+        await send_or_edit(update, context, "✅ Product removed.",
+                           InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="M_SHOP")],
+                                                 [InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
         return
 
     await q.answer("Unknown button", show_alert=True)
@@ -1728,7 +1710,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_user(uid, update.effective_user.username or "")
     flow = context.user_data.get(CTX_FLOW)
 
-    # support draft
     if flow == FLOW_SUPPORT_DRAFT:
         if update.message.text:
             payload = context.user_data.get(FLOW_SUPPORT_DRAFT, {"draft": ""})
@@ -1736,7 +1717,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data[FLOW_SUPPORT_DRAFT] = payload
         return
 
-    # ticket reply draft
     if flow == FLOW_SUPPORT_REPLY:
         if update.message.text:
             payload = context.user_data.get(FLOW_SUPPORT_REPLY, {"ticket_id": 0, "draft": ""})
@@ -1744,7 +1724,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data[FLOW_SUPPORT_REPLY] = payload
         return
 
-    # deposit flow
     if flow == FLOW_DEPOSIT:
         payload = context.user_data.get(FLOW_DEPOSIT, {})
         step = payload.get("step", "amount")
@@ -1774,36 +1753,32 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             shop_owner_id = int(payload.get("shop_owner_id", OWNER_MAIN))
             dep_id = create_deposit_request(uid, shop_owner_id, float(payload["amount"]), file_id)
 
-            # notify seller + superadmin, AND admins with approve/reject buttons instantly
             u = get_user(uid)
             buyer = f"@{u['username']}" if (u and (u["username"] or "").strip()) else str(uid)
             text = f"💳 Deposit Request\nDepID: {dep_id}\nShopOwner: {shop_owner_id}\nUser: {buyer}\nAmount: {fmt_money(float(payload['amount']))}"
 
-            # send to shop owner if seller shop
             if shop_owner_id != OWNER_MAIN:
                 try:
                     await context.bot.send_photo(shop_owner_id, file_id, caption=text, reply_markup=kb_deposit_actions(dep_id))
                 except Exception:
                     pass
 
-            # send to admins
             for a in ADMIN_IDS:
                 try:
                     await context.bot.send_photo(a, file_id, caption=text, reply_markup=kb_deposit_actions(dep_id))
                 except Exception:
                     pass
 
-            # send to superadmin
             try:
                 await context.bot.send_photo(SUPER_ADMIN_ID, file_id, caption=text, reply_markup=kb_deposit_actions(dep_id))
             except Exception:
                 pass
 
             reset_flow(context)
-            await update.message.reply_text("✅ Deposit request sent.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
+            await update.message.reply_text("✅ Deposit request sent.",
+                                            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Main Menu", callback_data="MAIN_MENU")]]))
             return
 
-    # edit wallet message
     if flow == FLOW_EDIT_WALLETMSG:
         payload = context.user_data.get(FLOW_EDIT_WALLETMSG, {})
         owner_id = int(payload.get("owner_id", OWNER_MAIN))
@@ -1815,7 +1790,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Send the wallet message as text.")
         return
 
-    # set wallet address
     if flow == FLOW_SET_WALLET_ADDR:
         if update.message.text:
             set_seller_wallet_addr(uid, update.message.text.strip())
@@ -1825,7 +1799,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Send wallet address as text.")
         return
 
-    # edit welcome (text/photo/video)
     if flow == FLOW_EDIT_WELCOME:
         payload = context.user_data.get(FLOW_EDIT_WELCOME, {})
         owner_id = int(payload.get("owner_id", WELCOME_PUBLIC))
@@ -1856,7 +1829,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Welcome saved.")
         return
 
-    # users search
     if flow == FLOW_USERS_SEARCH:
         payload = context.user_data.get(FLOW_USERS_SEARCH, {})
         mode = payload.get("mode", "USER_SEARCH_ALL")
@@ -1868,7 +1840,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             users = list_users_prefix(qtxt, 30)
             await update.message.reply_text("Users:", reply_markup=kb_user_list(users, is_seller_scope=False))
         else:
-            # seller scope: use same scope query but filter by prefix
             cur.execute("""
                 SELECT DISTINCT u.user_id, u.username, u.balance, u.created_ts
                 FROM users u
@@ -1883,7 +1854,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reset_flow(context)
         return
 
-    # seller search (for seller shops list)
     if flow == FLOW_SELLERS_SEARCH:
         qtxt = (update.message.text or "").strip()
         if not qtxt:
@@ -1900,7 +1870,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reset_flow(context)
         return
 
-    # category add
     if flow == FLOW_CAT_ADD:
         payload = context.user_data.get(FLOW_CAT_ADD, {})
         owner = int(payload.get("owner_id", uid))
@@ -1919,7 +1888,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Category added.")
         return
 
-    # co-category name step
     if flow == FLOW_COCAT_NAME:
         payload = context.user_data.get(FLOW_COCAT_NAME, {})
         owner = int(payload.get("owner_id", uid))
@@ -1939,7 +1907,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Co-category added.")
         return
 
-    # product details
     if flow == FLOW_PROD_DETAILS:
         payload = context.user_data.get(FLOW_PROD_DETAILS, {})
         owner = int(payload.get("owner_id", uid))
@@ -1964,7 +1931,6 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Product added. ProductID: {pid}")
         return
 
-    # delivery text
     if flow == FLOW_DELIVERY_TEXT:
         payload = context.user_data.get(FLOW_DELIVERY_TEXT, {})
         owner = int(payload.get("owner_id", uid))
