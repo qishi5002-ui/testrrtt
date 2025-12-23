@@ -2003,7 +2003,7 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     lines.append(f"Seller Subscription: <b>{money(amt)} {esc(CURRENCY)}</b>")
                 else:
                     sign = "+" if amt >= 0 else ""
-                    lines.append(f"{esc(kind)}: <b>{sign}{money(amt))} {esc(CURRENCY)}</b>")
+                    lines.append(f"{esc(kind)}: <b>{sign}{money(amt)} {esc(CURRENCY)}</b>")
                 lines.append("")
         await delete_callback_message(update, context)
         await update.effective_chat.send_message("\n".join(lines).strip(), parse_mode=ParseMode.HTML, reply_markup=kb_back_main())
