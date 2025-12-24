@@ -40,7 +40,7 @@
 #       ONLY welcome messages (seller shops) append "Bot made by @RekkoOwn" when branded or expired.
 #       No branding in menu messages.
 #
-import os, time, re, asyncio, sqlite3, logging, secrets
+import os, time, re, asyncio, sqlite3, logging, datetime, secrets
 from typing import Optional, Dict, Any, List, Tuple
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -333,6 +333,20 @@ def init_db():
     except Exception:
         pass
 
+
+    # --- Orders table (Order ID + delivered keys) ---
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS orders(
+        order_id TEXT PRIMARY KEY,
+        shop_owner_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        product_id INTEGER NOT NULL,
+        product_name TEXT NOT NULL,
+        qty INTEGER NOT NULL,
+        total REAL NOT NULL,
+        keys_text TEXT DEFAULT '',
+        created_at INTEGER NOT NULL
+    )""")
     conn.commit(); conn.close()
 
     ensure_shop_settings(SUPER_ADMIN_ID)
@@ -492,6 +506,48 @@ def log_tx(shop_owner_id: int, uid: int, kind: str, amount: float, note: str = "
     cur.execute("INSERT INTO transactions(shop_owner_id,user_id,kind,amount,note,qty,created_at) VALUES(?,?,?,?,?,?,?)",
                 (shop_owner_id, uid, kind, float(amount), note or "", int(qty or 1), ts()))
     conn.commit(); conn.close()
+
+# --- orders (Order ID + delivered keys) ---
+_ALPH = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+def gen_order_id(n: int = 10) -> str:
+    import secrets
+    return "ORD-" + "".join(secrets.choice(_ALPH) for _ in range(int(n)))
+
+def create_order(shop_owner_id: int, user_id: int, product_id: int, product_name: str, qty: int, total: float, keys: List[str]) -> str:
+    order_id = gen_order_id(10)
+    keys_text = "\n".join(keys or [])
+    conn = db(); cur = conn.cursor()
+    for _ in range(5):
+        try:
+            cur.execute(
+                "INSERT INTO orders(order_id,shop_owner_id,user_id,product_id,product_name,qty,total,keys_text,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (order_id, int(shop_owner_id), int(user_id), int(product_id), product_name, int(qty), float(total), keys_text, ts())
+            )
+            conn.commit(); conn.close()
+            return order_id
+        except sqlite3.IntegrityError:
+            order_id = gen_order_id(10)
+        except Exception:
+            try: conn.close()
+            except Exception: pass
+            return order_id
+    try: conn.close()
+    except Exception: pass
+    return order_id
+
+def list_orders_for_user(shop_owner_id: int, user_id: int, limit: int = 30) -> List[sqlite3.Row]:
+    conn = db(); cur = conn.cursor()
+    cur.execute("SELECT * FROM orders WHERE shop_owner_id=? AND user_id=? ORDER BY created_at DESC LIMIT ?", (int(shop_owner_id), int(user_id), int(limit)))
+    rows = cur.fetchall(); conn.close()
+    return rows
+
+def get_order_by_id(order_id: str) -> Optional[sqlite3.Row]:
+    conn = db(); cur = conn.cursor()
+    cur.execute("SELECT * FROM orders WHERE order_id=?", ((order_id or "").strip(),))
+    r = cur.fetchone(); conn.close()
+    return r
+
 
 def create_order(shop_owner_id: int, user_id: int, product_id: int, product_name: str, qty: int, total: float, keys: List[str]) -> str:
     order_id = new_order_id()
@@ -1038,12 +1094,14 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         await update.callback_query.message.reply_text("✅ Quantity updated.", reply_markup=kb([[InlineKeyboardButton("🔄 Refresh", callback_data=f"p:prod:{pid}")]]))
 
     async def product_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
         await update.callback_query.answer()
         sid = current_shop_id()
         uid = update.effective_user.id
         if is_banned_user(sid, uid):
             await update.callback_query.message.reply_text("❌ You are restricted from this shop.")
             return
+
         pid = int(update.callback_query.data.split(":")[2])
         p = prod_get(sid, pid)
         if not p:
@@ -1062,39 +1120,28 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         total = price * qty
         bal = get_balance(sid, uid)
         if bal < total:
-            await update.callback_query.message.reply_text(f"❌ Not enough balance.\nBalance: {money(bal)} {esc(CURRENCY)}", parse_mode=ParseMode.HTML)
+            await update.callback_query.message.reply_text(
+                f"❌ Not enough balance.\nBalance: {money(bal)} {esc(CURRENCY)}",
+                parse_mode=ParseMode.HTML,
+            )
             return
 
         set_balance(sid, uid, bal - total)
-
         keys = pop_keys(sid, pid, uid, qty)
-        order_id = create_order(sid, uid, pid, p["name"], qty, total, keys)
-        log_tx(sid, uid, "purchase", -total, f'{p["name"]} | {order_id}', qty)
-        # --- Order + History safety ---
-        # If anything fails here, we still deliver keys to the user and keep the bot running.
-        order_id = ""
-        try:
-            order_id = create_order(sid, uid, pid, p["name"], qty, total, keys)
-        except Exception:
-            # fallback (still unique enough) if DB insert fails
-            try:
-                order_id = gen_order_id(10)
-            except Exception:
-                order_id = str(ts())
 
-        try:
-            log_tx(sid, uid, "purchase", -total, f'{p["name"]} | {order_id}', qty)
-        except Exception:
-            pass
+        order_id = create_order(sid, uid, pid, p["name"], qty, total, keys)
+        log_tx(sid, uid, "purchase", -total, f"{p['name']} | {order_id}", qty)
 
         link = (p["tg_link"] or "").strip()
 
         msg = (
             f"✅ <b>Purchase Successful</b>\n\n"
+            f"Order ID: <b>{esc(order_id)}</b>\n"
             f"Product: <b>{esc(p['name'])}</b>\n"
             f"Qty: <b>{qty}</b>\n"
-            f"Paid: <b>{money(total)} {esc(CURRENCY)}</b>\nOrder ID: <code>{order_id}</code>\n\n"
-            f"<b>Key(s):</b>\n" + ("\n".join([f"<code>{esc(k)}</code>" for k in keys]) if keys else "<i>No keys delivered.</i>")
+            f"Paid: <b>{money(total)} {esc(CURRENCY)}</b>\n\n"
+            f"<b>Key(s):</b>\n"
+            + ("\n".join([f"<code>{esc(k)}</code>" for k in (keys or [])]) or "<i>No key delivered.</i>")
         )
 
         rows = []
@@ -1104,26 +1151,14 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
 
         await update.callback_query.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
 
-        # notify (order id + keys to Super Admin)
         try:
             keys_block = "\n".join(keys) if keys else "-"
-            if bot_kind == "seller":
-                await context.bot.send_message(
-                    shop_owner_id,
-                    f"🔔 New Order\nOrder ID: {order_id}\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}",
-                )
-                await context.bot.send_message(
-                    SUPER_ADMIN_ID,
-                    f"🔔 Seller Order\nOrder ID: {order_id}\nSeller: {user_display(shop_owner_id)}\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}\n\nKeys:\n{keys_block}",
-                )
-            else:
-                await context.bot.send_message(
-                    SUPER_ADMIN_ID,
-                    f"🔔 Main Shop Order\nOrder ID: {order_id}\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}\n\nKeys:\n{keys_block}",
-                )
+            await context.bot.send_message(
+                SUPER_ADMIN_ID,
+                f"🔔 Order\nOrder ID: {order_id}\nShop: {user_display(shop_owner_id) if bot_kind=='seller' else 'Main'}\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}\n\nKeys:\n{keys_block}",
+            )
         except Exception:
             pass
-
     async def _extract_channel_username(link: str) -> Optional[str]:
         link = (link or "").strip()
         if not link:
@@ -1396,16 +1431,19 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
     # ---------- History ----------
 
     async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
         await update.callback_query.answer()
         sid = current_shop_id()
         uid = update.effective_user.id
         if is_banned_user(sid, uid):
             await update.callback_query.message.reply_text("❌ You are restricted from this shop.")
             return
+
         conn = db(); cur = conn.cursor()
         cur.execute("SELECT * FROM transactions WHERE shop_owner_id=? AND user_id=? ORDER BY id DESC LIMIT 30", (sid, uid))
         rows = cur.fetchall(); conn.close()
         bal = get_balance(sid, uid)
+
         lines = ["📜 <b>History</b>\n"]
         if not rows:
             lines.append("No history yet.")
@@ -1415,32 +1453,19 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
                 amt = float(r["amount"] or 0)
                 note = (r["note"] or "").strip()
                 qty = int(r["qty"] or 1)
-                if kind == "deposit":
-                    lines.append(f"✅ Deposited{(f' ({esc(note)})' if note else '')}: <b>{money(amt)} {esc(CURRENCY)}</b>")
-                elif kind == "purchase":
-                    order = ""
-                    prodname = note
-                    m2 = re.search(r"(ORD-[0-9A-F]+)", note or "")
-                    if m2:
-                        order = m2.group(1)
-                        prodname = (note or "").replace(order, "").replace("|", "").strip()
-                    if order:
-                        lines.append(
-                            f"🛒 Purchased: <b>{esc(prodname)}</b> (x{qty}) — <b>{money(abs(amt))} {esc(CURRENCY)}</b>\n"
-                            f"Order ID: <code>{order}</code>"
-                        )
-                    else:
-                        lines.append(f"🛒 Purchased: <b>{esc(note)}</b> (x{qty}) — <b>{money(abs(amt))} {esc(CURRENCY)}</b>")
-                elif kind == "balance_edit":
-                    sign = "+" if amt >= 0 else "-"
-                    lines.append(f"⚙️ Balance {sign}: <b>{money(abs(amt))} {esc(CURRENCY)}</b>")
-                elif kind == "plan":
-                    lines.append(f"🤖 Plan: <b>{esc(note)}</b> — <b>{money(abs(amt))} {esc(CURRENCY)}</b>")
-                else:
-                    lines.append(f"{esc(kind)}: <b>{money(amt)} {esc(CURRENCY)}</b>")
-        lines.append(f"\nTotal Balance: <b>{money(bal)} {esc(CURRENCY)}</b>")
-        await update.callback_query.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]]))
+                dt = datetime.datetime.fromtimestamp(int(r["created_at"] or 0)).strftime("%Y-%m-%d %H:%M")
 
+                if kind == "purchase":
+                    pname, oid = note, ""
+                    if " | " in note:
+                        pname, oid = [x.strip() for x in note.split(" | ", 1)]
+                    extra = f"\nOrder ID: <b>{esc(oid)}</b>" if oid else ""
+                    lines.append(f"🛒 Purchased: <b>{esc(pname)}</b> (x{qty}) — <b>{money(abs(amt))} {esc(CURRENCY)}</b>{extra}\nDate: <b>{dt}</b>")
+                else:
+                    lines.append(f"{esc(kind)}: <b>{money(amt)} {esc(CURRENCY)}</b>\nDate: <b>{dt}</b>")
+
+        lines.append(f"\nTotal Balance: <b>{money(bal)} {esc(CURRENCY)}</b>")
+        await update.callback_query.message.reply_text("\n\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]]))
     # ---------- Support (draft -> DONE) ----------
     async def support_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
