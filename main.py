@@ -955,6 +955,26 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         except Exception:
             pass
 
+    async def _extract_channel_username(link: str) -> Optional[str]:
+        link = (link or "").strip()
+        if not link:
+            return None
+        # Accept formats: @channel, t.me/channel, https://t.me/channel
+        if link.startswith("@"):
+            return re.sub(r"[^A-Za-z0-9_]", "", link[1:])
+        m = re.search(r"t\.me/([A-Za-z0-9_]{5,})", link)
+        if m:
+            return m.group(1)
+        return None
+
+    async def _need_join_message(chat_username: str) -> InlineKeyboardMarkup:
+        url = f"https://t.me/{chat_username}"
+        return kb([
+            [InlineKeyboardButton("✅ Join Channel", url=url)],
+            [InlineKeyboardButton("🔄 I Joined", callback_data="p:filecheck")],
+            [InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]
+        ])
+
     async def product_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         sid = current_shop_id()
@@ -965,9 +985,56 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return
         link = (p["tg_link"] or "").strip()
         if not link:
-            await update.callback_query.message.reply_text("No private link set.")
+            await update.callback_query.message.reply_text("No channel set for this product.")
             return
-        await update.callback_query.message.reply_text(f"📦 <b>Private Link</b>\n{esc(link)}", parse_mode=ParseMode.HTML, reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]]))
+
+        # We gate access by requiring the user to join the channel.
+        # We do NOT show any private link. We only direct them to the channel.
+        chat_username = await _extract_channel_username(link)
+
+        if not chat_username:
+            # Can't verify membership (invite links/private). Still show join button only.
+            await update.callback_query.message.reply_text(
+                "📦 <b>Get File</b>\n\nPlease join the channel to access the files.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb([
+                    [InlineKeyboardButton("✅ Join Channel", url=link)],
+                    [InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]
+                ])
+            )
+            return
+
+        # Check membership (bot must be able to see the channel & have access to getChatMember).
+        try:
+            member = await context.bot.get_chat_member(chat_id=f"@{chat_username}", user_id=update.effective_user.id)
+            status = getattr(member, "status", "") or ""
+            joined = status not in ("left", "kicked")
+        except Exception:
+            joined = False
+
+        if not joined:
+            await update.callback_query.message.reply_text(
+                "📦 <b>Get File</b>\n\nYou must join the channel first.\nAfter joining, tap <b>I Joined</b>.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb([
+                    [InlineKeyboardButton("✅ Join Channel", url=f"https://t.me/{chat_username}")],
+                    [InlineKeyboardButton("🔄 I Joined", callback_data=f"p:filecheck:{pid}")],
+                    [InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]
+                ])
+            )
+            return
+
+        # Joined: we still do NOT show private link.
+        await update.callback_query.message.reply_text(
+            "✅ <b>Access Granted</b>\n\nOpen the channel to download your file(s).",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([
+                [InlineKeyboardButton("📦 Open Channel", url=f"https://t.me/{chat_username}")],
+                [InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]
+            ])
+        )
+
+
 
     # ---------- Wallet / Deposit ----------
     async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2045,6 +2112,8 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         if data.startswith("p:buy:"):
             await product_buy(update, context); return
         if data.startswith("p:file:"):
+            await product_file(update, context); return
+        if data.startswith("p:filecheck:"):
             await product_file(update, context); return
 
         if data == "m:wallet":
