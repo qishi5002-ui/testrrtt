@@ -866,6 +866,7 @@ class BotManager:
         app = Application.builder().token(token).build()
         register_handlers(app, shop_owner_id=seller_id, bot_kind="seller")
         await app.initialize()
+        await app.bot.delete_webhook(drop_pending_updates=True)
         await app.start()
         task = asyncio.create_task(app.updater.start_polling(drop_pending_updates=True))
         self.apps[seller_id] = app
@@ -1649,6 +1650,10 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return
 
         token = (update.message.text or "").strip()
+        if token.strip() == BOT_TOKEN.strip():
+            await update.message.reply_text("❌ This token is already used by the Main Shop bot. Create a new bot at @BotFather.")
+            return
+
         try:
             tmp = Application.builder().token(token).build()
             await tmp.initialize()
@@ -2869,6 +2874,7 @@ async def main():
     register_handlers(master, shop_owner_id=SUPER_ADMIN_ID, bot_kind="master")
 
     await master.initialize()
+    await master.bot.delete_webhook(drop_pending_updates=True)
     await master.start()
     asyncio.create_task(master.updater.start_polling(drop_pending_updates=True))
     asyncio.create_task(watchdog())
