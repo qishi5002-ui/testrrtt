@@ -40,7 +40,7 @@
 #       ONLY welcome messages (seller shops) append "Bot made by @RekkoOwn" when branded or expired.
 #       No branding in menu messages.
 #
-import os, time, re, asyncio, sqlite3, logging
+import os, time, re, asyncio, sqlite3, logging, secrets
 from typing import Optional, Dict, Any, List, Tuple
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -260,6 +260,21 @@ def init_db():
         qty INTEGER DEFAULT 1,
         created_at INTEGER NOT NULL
     )""")
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS orders(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        order_id TEXT NOT NULL UNIQUE,
+        shop_owner_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        product_id INTEGER NOT NULL,
+        product_name TEXT NOT NULL,
+        qty INTEGER NOT NULL,
+        total REAL NOT NULL,
+        keys_text TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    )""")
+
 
     conn.commit(); conn.close()
 
@@ -925,16 +940,29 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return
 
         set_balance(sid, uid, bal - total)
-        log_tx(sid, uid, "purchase", -total, p["name"], qty)
+        order_id = "OD" + secrets.token_hex(4).upper()
+
+        log_tx(sid, uid, "purchase", -total, f"{p['name']} | Order {order_id}", qty)
 
         keys = pop_keys(sid, pid, uid, qty)
+
+        # Save order + keys for admin lookup
+        conn = db(); cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO orders(order_id,shop_owner_id,user_id,product_id,product_name,qty,total,keys_text,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?)",
+            (order_id, sid, uid, pid, p["name"], qty, total, "\n".join(keys), ts())
+        )
+        conn.commit(); conn.close()
+
         link = (p["tg_link"] or "").strip()
 
         msg = (
             f"✅ <b>Purchase Successful</b>\n\n"
             f"Product: <b>{esc(p['name'])}</b>\n"
             f"Qty: <b>{qty}</b>\n"
-            f"Paid: <b>{money(total)} {esc(CURRENCY)}</b>\n\n"
+            f"Paid: <b>{money(total)} {esc(CURRENCY)}</b>\n"
+            f"Order ID: <b>{esc(order_id)}</b>\n\n"
             f"<b>Key(s):</b>\n" + "\n".join([f"<code>{esc(k)}</code>" for k in keys])
         )
 
@@ -948,10 +976,10 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         # notify
         try:
             if bot_kind == "seller":
-                await context.bot.send_message(shop_owner_id, f"🔔 New purchase\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}")
-                await context.bot.send_message(SUPER_ADMIN_ID, f"🔔 Seller purchase\nSeller: {user_display(shop_owner_id)}\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}")
+                await context.bot.send_message(shop_owner_id, f"🔔 New purchase\nOrder: {order_id}\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}\n\nKeys:\n" + "\n".join(keys))
+                await context.bot.send_message(SUPER_ADMIN_ID, f"🔔 Seller purchase\nOrder: {order_id}\nSeller: {user_display(shop_owner_id)}\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}\n\nKeys:\n" + "\n".join(keys))
             else:
-                await context.bot.send_message(SUPER_ADMIN_ID, f"🔔 Main shop purchase\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}")
+                await context.bot.send_message(SUPER_ADMIN_ID, f"🔔 Main shop purchase\nOrder: {order_id}\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}\n\nKeys:\n" + "\n".join(keys))
         except Exception:
             pass
 
@@ -1190,7 +1218,14 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
                 if kind == "deposit":
                     lines.append(f"✅ Deposited: <b>{money(amt)} {esc(CURRENCY)}</b>")
                 elif kind == "purchase":
-                    lines.append(f"🛒 Purchased: <b>{esc(note)}</b> (x{qty}) — <b>{money(abs(amt))} {esc(CURRENCY)}</b>")
+                    prod = note
+                    order = ""
+                    if " | Order " in note:
+                        prod, order = note.split(" | Order ", 1)
+                    lines.append(
+                        f"🛒 Purchased: <b>{esc(prod)}</b> (x{qty}) — <b>{money(abs(amt))} {esc(CURRENCY)}</b>"
+                        + (f"\nOrder ID: <b>{esc(order)}</b>" if order else "")
+                    )
                 elif kind == "balance_edit":
                     sign = "+" if amt >= 0 else "-"
                     lines.append(f"⚙️ Balance {sign}: <b>{money(abs(amt))} {esc(CURRENCY)}</b>")
