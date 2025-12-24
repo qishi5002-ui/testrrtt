@@ -45,6 +45,7 @@ from typing import Optional, Dict, Any, List, Tuple
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
+from telegram.error import Conflict
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, MessageHandler,
     ContextTypes, filters
@@ -856,19 +857,51 @@ def seller_menu(uid: int, seller_id: int) -> InlineKeyboardMarkup:
     return grid(btns, 2)
 
 # ---------------- MULTI-BOT MANAGER ----------------
+
+# ---------------- POLLING (CONFLICT-SAFE) ----------------
+async def start_polling_resilient(app: Application, tag: str):
+    """Start polling with automatic retry on Telegram Conflict during deploy overlaps."""
+    while True:
+        try:
+            await app.bot.delete_webhook(drop_pending_updates=True)
+        except Exception:
+            pass
+        try:
+            await app.updater.start_polling(drop_pending_updates=True)
+            return
+        except Conflict as e:
+            log.warning("Polling conflict for %s: %s (retrying)", tag, e)
+            await asyncio.sleep(5)
+        except Exception:
+            log.exception("Polling error for %s (retrying)", tag)
+            await asyncio.sleep(5)
+
 class BotManager:
     def __init__(self):
         self.apps: Dict[int, Application] = {}
         self.tasks: Dict[int, asyncio.Task] = {}
 
     async def start_seller_bot(self, seller_id: int, token: str):
+        # Prevent polling conflicts: block using master token or duplicate seller tokens
+        if token.strip() == BOT_TOKEN.strip():
+            log.warning('Refusing to start seller bot %s with master BOT_TOKEN', seller_id)
+            disable_seller_bot(seller_id)
+            return
+        # If another running seller already uses this token, refuse to start the duplicate
+        for sid, app0 in list(self.apps.items()):
+            try:
+                if getattr(app0, 'bot', None) and app0.bot and app0.bot.token == token:
+                    log.warning('Refusing to start seller bot %s: token already used by seller %s', seller_id, sid)
+                    disable_seller_bot(seller_id)
+                    return
+            except Exception:
+                pass
         await self.stop_seller_bot(seller_id)
         app = Application.builder().token(token).build()
         register_handlers(app, shop_owner_id=seller_id, bot_kind="seller")
         await app.initialize()
-        await app.bot.delete_webhook(drop_pending_updates=True)
         await app.start()
-        task = asyncio.create_task(app.updater.start_polling(drop_pending_updates=True))
+        task = asyncio.create_task(start_polling_resilient(app, f"seller:{seller_id}"))
         self.apps[seller_id] = app
         self.tasks[seller_id] = task
         log.info("Started seller bot seller_id=%s", seller_id)
@@ -1650,10 +1683,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return
 
         token = (update.message.text or "").strip()
-        if token.strip() == BOT_TOKEN.strip():
-            await update.message.reply_text("❌ This token is already used by the Main Shop bot. Create a new bot at @BotFather.")
-            return
-
         try:
             tmp = Application.builder().token(token).build()
             await tmp.initialize()
@@ -2874,9 +2903,8 @@ async def main():
     register_handlers(master, shop_owner_id=SUPER_ADMIN_ID, bot_kind="master")
 
     await master.initialize()
-    await master.bot.delete_webhook(drop_pending_updates=True)
     await master.start()
-    asyncio.create_task(master.updater.start_polling(drop_pending_updates=True))
+    asyncio.create_task(start_polling_resilient(master, 'master'))
     asyncio.create_task(watchdog())
     log.info("Master bot started.")
 
