@@ -1323,6 +1323,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
 
         user_id = int(r["user_id"])
         amt = float(r["amount"])
+        method_name = (r["method_name"] if "method_name" in r.keys() else "") or ""
 
         if decision == "ok":
             add_balance(sid, user_id, amt)
@@ -1343,7 +1344,24 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             except Exception:
                 pass
 
-        # delete admin request message
+                # show decision on admin message (so you can see it was approved/rejected)
+        try:
+            if update.callback_query.message.photo:
+                await update.callback_query.edit_message_caption(
+                    caption=(update.callback_query.message.caption or "") + f"\n\n✅ Status: {('APPROVED' if decision=='ok' else 'REJECTED')}",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=None
+                )
+            else:
+                await update.callback_query.edit_message_text(
+                    text=(update.callback_query.message.text or "") + f"\n\n✅ Status: {('APPROVED' if decision=='ok' else 'REJECTED')}",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=None
+                )
+        except Exception:
+            pass
+
+# delete admin request message
         try:
             await safe_delete(context.bot, int(r["admin_chat_id"]), int(r["admin_msg_id"]))
         except Exception:
@@ -1673,7 +1691,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             InlineKeyboardButton("👥 Users List", callback_data=f"a:users:{sid}"),
             InlineKeyboardButton("📢 Broadcast", callback_data=f"a:bcast:{sid}"),
             InlineKeyboardButton("🖼 Edit Welcome", callback_data=f"a:welcome:{sid}"),
-            InlineKeyboardButton("💳 Edit Wallet", callback_data=f"a:wallet:{sid}"),
             InlineKeyboardButton("💳 Deposit Methods", callback_data=f"a:pm:{sid}"),
             InlineKeyboardButton("🔎 Search Order ID", callback_data=f"a:osearch:{sid}"),
             InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}"),
@@ -1995,79 +2012,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         sid = int(update.callback_query.data.split(":")[2])
         set_state(context, "edit_welcome", {"shop_id": sid})
         await update.callback_query.message.reply_text("Send welcome TEXT, or PHOTO/VIDEO with caption.", reply_markup=admin_panel_kb(sid))
-
-    async def edit_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.callback_query.answer()
-        sid = int(update.callback_query.data.split(":")[2])
-
-        methods = pm_list(sid)
-        s = get_shop_settings(sid)
-        default_txt = (s["wallet_message"] or "").strip()
-
-        rows = [
-            [InlineKeyboardButton("✏️ Edit TRC-20 Text", callback_data=f"apm:editdefault:{sid}")],
-            [InlineKeyboardButton("➕ Add Payment Method", callback_data=f"apm:add:{sid}")],
-        ]
-        for r in methods[:12]:
-            rows.append([InlineKeyboardButton(f"💳 {r['name']}", callback_data=f"apm:open:{sid}:{r['id']}")])
-        rows.append([InlineKeyboardButton("⬅️ Admin", callback_data="m:admin")])
-
-        await update.callback_query.message.reply_text(
-            "💳 <b>Wallet / Payment Methods</b>\n\n"
-            f"TRC-20 text is {'set' if default_txt else 'not set'}.\n"
-            "Add more methods like PAYPAL / BANK and set custom text.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb(rows)
-        )
-
-    async def pm_edit_default(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.callback_query.answer()
-        sid = int(update.callback_query.data.split(":")[2])
-        set_state(context, "edit_wallet", {"shop_id": sid})
-        await update.callback_query.message.reply_text("Send TRC-20 instructions text (or '-' to clear):", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"a:wallet:{sid}")]]))
-
-    async def pm_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.callback_query.answer()
-        sid = int(update.callback_query.data.split(":")[2])
-        set_state(context, "pm_add_name", {"shop_id": sid})
-        await update.callback_query.message.reply_text("Send new payment method name (example: PAYPAL):")
-
-    async def pm_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.callback_query.answer()
-        _, _, sid_s, pmid_s = update.callback_query.data.split(":")
-        sid = int(sid_s); pmid = int(pmid_s)
-        r = pm_get(pmid)
-        if not r or int(r["shop_owner_id"]) != sid:
-            await update.callback_query.message.reply_text("Not found.")
-            return
-        await update.callback_query.message.reply_text(
-            f"💳 <b>{esc(r['name'])}</b>\n\n{esc(r['instructions'])}",
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb([
-                [InlineKeyboardButton("✏️ Edit", callback_data=f"apm:edit:{sid}:{pmid}")],
-                [InlineKeyboardButton("🗑 Delete", callback_data=f"apm:del:{sid}:{pmid}")],
-                [InlineKeyboardButton("⬅️ Back", callback_data=f"a:wallet:{sid}")]
-            ])
-        )
-
-    async def pm_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.callback_query.answer()
-        _, _, sid_s, pmid_s = update.callback_query.data.split(":")
-        sid = int(sid_s); pmid = int(pmid_s)
-        set_state(context, "pm_edit", {"shop_id": sid, "pm_id": pmid})
-        await update.callback_query.message.reply_text("Send new instructions text (or '-' to clear):")
-
-    async def pm_delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.callback_query.answer()
-        _, _, sid_s, pmid_s = update.callback_query.data.split(":")
-        sid = int(sid_s); pmid = int(pmid_s)
-        r = pm_get(pmid)
-        if r and int(r["shop_owner_id"]) == sid:
-            pm_delete(pmid)
-        await update.callback_query.message.reply_text("✅ Deleted.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"a:wallet:{sid}")]]))
-
-
-
     # ---- Manage Catalog (FULL) ----
     async def manage_root(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
@@ -2325,17 +2269,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
                 set_shop_setting(sid, "welcome_text", msg.text or "")
             clear_state(context)
             await msg.reply_text("✅ Welcome updated.", reply_markup=admin_panel_kb(sid))
-            return
-
-        # edit wallet
-        if state == "edit_wallet":
-            sid = int(data["shop_id"])
-            txt = (update.message.text or "").strip()
-            if txt == "-":
-                txt = ""
-            set_shop_setting(sid, "wallet_message", txt)
-            clear_state(context)
-            await update.message.reply_text("✅ Wallet message updated.", reply_markup=admin_panel_kb(sid))
             return
 
         # payment methods add/edit
@@ -2666,8 +2599,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
 
         if data.startswith("a:welcome:"):
             await edit_welcome(update, context); return
-        if data.startswith("a:wallet:"):
-            await edit_wallet(update, context); return
         if data.startswith("a:pm:"):
             await admin_pm_root(update, context); return
         if data.startswith("apm:add:"):
