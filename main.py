@@ -939,11 +939,18 @@ def now_text(t: int) -> str:
 # HANDLERS REGISTRATION (per bot)
 # =========================
 def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
-    """
-    bot_kind: "master" or "seller"
-    shop_owner_id: SUPER_ADMIN_ID for master, seller_id for seller bots
-    """
+    async def _start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        return await cmd_start(update, context, shop_owner_id)
 
+    async def _cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        return await on_callback(update, context, shop_owner_id, bot_kind)
+
+    async def _msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        return await on_message(update, context, shop_owner_id, bot_kind)
+
+    app.add_handler(CommandHandler("start", _start))
+    app.add_handler(CallbackQueryHandler(_cb))
+    app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, _msg))
     def current_shop_id() -> int:
         return shop_owner_id if bot_kind == "seller" else SUPER_ADMIN_ID
 
