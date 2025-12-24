@@ -1,80 +1,47 @@
-# main.py — AutoPanel (Master Shop + Optional White‑Label Seller Bots) FULL
-# Python 3.11+ | python-telegram-bot==20.8 | Railway-ready (polling)
+# main.py — AutoPanel (Master Shop + Connected Seller Bots) — FULL FEATURES
+# Railway-ready | python-telegram-bot==20.8 | SQLite
 #
 # =========================
-# ✅ WHAT THIS BOT INCLUDES
+# ENV VARS (Railway Vars)
 # =========================
-# MASTER SHOP (your bot token):
-# - User buttons: Products / Wallet / History / Support / Connect My Bot
-# - Super Admin only: Admin Panel + Super Admin button
+# BOT_TOKEN               (master bot token)
+# SUPER_ADMIN_ID          (your Telegram numeric ID)  [or ADMIN_ID]
+# STORE_NAME              default AutoPanel
+# CURRENCY                default USDT
+# DB_FILE                 default data.db
+# PLAN_A_PRICE            default 5   (Branded welcome)
+# PLAN_B_PRICE            default 10  (White-label welcome)
+# PLAN_DAYS               default 30
+# MASTER_BOT_USERNAME     master bot username without @ (needed for seller-bot "Extend Subscription" deep-link)
 #
-# SELLER WHITE‑LABEL (Option 2):
-# - Seller connects their own BotFather token via "Connect My Bot" in Master Shop
-# - Seller bot runs on same server (started/stopped automatically)
-# - Seller bot users ONLY see seller shop (never see master shop)
-# - Seller owner sees Admin Panel + Extend Subscription in seller bot
+# =========================
+# IMPORTANT RULES IMPLEMENTED
+# =========================
+# - Master shop users see: Products / Wallet / History / Support / Connect My Bot
+# - Seller bot users see ONLY seller shop: Products / Wallet / History / Support
+# - Seller owner (and Super Admin) in seller bot sees: Admin Panel + Extend Subscription
+# - Admin Panel (master: super admin only) (seller: owner + super admin unless panel banned)
+# - No users can see other users list. Only Admin Panel can.
+# - Deposits require PHOTO proof.
+# - Deposit approvals:
+#       master shop -> super admin
+#       seller shop -> seller owner only
+# - Support inbox: user drafts text then presses DONE; owner replies.
+# - Products: Category > Co-Category > Product
+# - Product has: price, optional description, optional media (photo/video), optional private link
+# - Keys: 1 line = 1 stock; delivered lines are never reused.
+# - Purchase quantity +- then Buy; gives key lines and Get File button hides the link.
+# - Plan logic:
+#       Plan A ($5) -> Branded
+#           If already Branded and ACTIVE, paying $5 upgrades to White-label (your rule)
+#       Plan B ($10) -> White-label
+#       White-label cannot pay $5 (blocked)
+# - Branding:
+#       ONLY welcome messages (seller shops) append "Bot made by @RekkoOwn" when branded or expired.
+#       No branding in menu messages.
 #
-# PLANS (deducted from MASTER SHOP wallet balance):
-# - Plan A: $5 / 30 days => Branded (WELCOME ONLY appends "Bot made by @RekkoOwn")
-# - Plan B: $10 / 30 days => White‑Label (WELCOME has no branding)
-# Rules:
-# - White‑Label cannot pay $5 (blocked; must renew with $10)
-# - Branded paying $5 while ACTIVE upgrades to White‑Label
-# - Paying $10 always sets/keeps White‑Label
-#
-# ADMIN PANEL (same in Master + Seller bots, controls CURRENT shop):
-# - Users List (list + search) -> edit balance (+/- custom), ban/unban, restrict 7/14/30, reply support
-# - Broadcast (text OR photo OR video to all users in that shop)
-# - Edit Welcome (text + optional photo/video) — branding applied ONLY at render time for seller shops
-# - Edit Wallet Message (any wallet type/instructions)
-# - Manage Categories -> Co‑Categories -> Products (each can have optional description + media)
-# - Keys per product (1 line = 1 stock). 0 stock => Out of Stock.
-# - Product optional Private Telegram Link revealed via "📦 Get File" button (hidden)
-#
-# WALLET / DEPOSIT:
-# - Deposit requires amount + PHOTO proof
-# - Approvals go to shop owner:
-#     - Master shop deposits -> SUPER ADMIN
-#     - Seller shop deposits -> that seller owner (NOT super admin)
-# - Approve/Reject deletes the admin request message after handling
-#
-# SUPPORT:
-# - User writes messages, presses DONE to send.
-# - Shop owner replies; user receives.
-#
-# HISTORY:
-# - Clean formatting (Deposited / Purchased / Balance edit / Plan)
-#
-# SUPER ADMIN BUTTON (only your ID) includes:
-# - Sellers list (search + click): ban/restrict shop, ban panel, edit seller master-balance, warn expiring
-#
-# ====================
-# ENVIRONMENT VARIABLES
-# ====================
-# Required:
-#   BOT_TOKEN
-#   SUPER_ADMIN_ID   (or ADMIN_ID)
-# Optional:
-#   DB_FILE=data.db
-#   STORE_NAME=AutoPanel
-#   CURRENCY=USDT
-#   PLAN_A_PRICE=5
-#   PLAN_B_PRICE=10
-#   PLAN_DAYS=30
-#   MASTER_BOT_USERNAME=YourMasterBotUsername   (needed for seller "Extend Subscription" deep link)
-#
-# NOTE:
-# - No /admin commands are needed. Everything is buttons + prompts.
-# - No asking for user_id/seller_id. Lists + search are used.
-# - This file is intentionally self-contained.
-
-import os
-import time
-import re
-import asyncio
-import sqlite3
-import logging
-from typing import Optional, Dict, List, Tuple, Any
+import os, time, re, asyncio, sqlite3, logging
+from typing import Optional, Dict, Any, List, Tuple
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
@@ -91,8 +58,8 @@ DB_FILE = (os.getenv("DB_FILE") or "data.db").strip()
 STORE_NAME = (os.getenv("STORE_NAME") or "AutoPanel").strip()
 CURRENCY = (os.getenv("CURRENCY") or "USDT").strip()
 
-PLAN_A_PRICE = float((os.getenv("PLAN_A_PRICE") or "5").strip() or "5")    # $5 branded
-PLAN_B_PRICE = float((os.getenv("PLAN_B_PRICE") or "10").strip() or "10")  # $10 whitelabel
+PLAN_A_PRICE = float((os.getenv("PLAN_A_PRICE") or "5").strip() or "5")     # $5 branded
+PLAN_B_PRICE = float((os.getenv("PLAN_B_PRICE") or "10").strip() or "10")   # $10 whitelabel
 PLAN_DAYS = int((os.getenv("PLAN_DAYS") or "30").strip() or "30")
 MASTER_BOT_USERNAME = (os.getenv("MASTER_BOT_USERNAME") or "").strip().lstrip("@")
 
@@ -128,9 +95,9 @@ def grid(btns: List[InlineKeyboardButton], cols: int = 2) -> InlineKeyboardMarku
         rows.append(btns[i:i+cols])
     return InlineKeyboardMarkup(rows)
 
-async def safe_delete(bot, chat_id: int, message_id: int) -> None:
+async def safe_delete(bot, chat_id: int, message_id: int):
     try:
-        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+        await bot.delete_message(chat_id, message_id)
     except Exception:
         pass
 
@@ -149,26 +116,22 @@ def db() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     return conn
 
-def init_db() -> None:
-    conn = db()
-    cur = conn.cursor()
+def init_db():
+    conn = db(); cur = conn.cursor()
 
     cur.execute("CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY, username TEXT DEFAULT '', first_name TEXT DEFAULT '', last_name TEXT DEFAULT '', last_seen INTEGER DEFAULT 0)")
     cur.execute("CREATE TABLE IF NOT EXISTS sessions(user_id INTEGER PRIMARY KEY, shop_owner_id INTEGER NOT NULL, locked INTEGER DEFAULT 0)")
 
-    # sellers: subscription and control flags
     cur.execute("""
     CREATE TABLE IF NOT EXISTS sellers(
         seller_id INTEGER PRIMARY KEY,
         sub_until INTEGER DEFAULT 0,
-        plan TEXT DEFAULT 'branded', -- branded / whitelabel
+        plan TEXT DEFAULT 'branded', -- branded/whitelabel
         banned_shop INTEGER DEFAULT 0,
         banned_panel INTEGER DEFAULT 0,
         restricted_until INTEGER DEFAULT 0
-    )
-    """)
+    )""")
 
-    # seller bots token storage
     cur.execute("""
     CREATE TABLE IF NOT EXISTS seller_bots(
         seller_id INTEGER PRIMARY KEY,
@@ -177,10 +140,8 @@ def init_db() -> None:
         enabled INTEGER DEFAULT 1,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
-    )
-    """)
+    )""")
 
-    # per-shop settings
     cur.execute("""
     CREATE TABLE IF NOT EXISTS shop_settings(
         shop_owner_id INTEGER PRIMARY KEY,
@@ -189,20 +150,16 @@ def init_db() -> None:
         welcome_file_id TEXT DEFAULT '',
         welcome_file_type TEXT DEFAULT '', -- photo/video
         connect_desc TEXT DEFAULT ''
-    )
-    """)
+    )""")
 
-    # balances: per shop per user
     cur.execute("""
     CREATE TABLE IF NOT EXISTS balances(
         shop_owner_id INTEGER NOT NULL,
         user_id INTEGER NOT NULL,
         balance REAL DEFAULT 0,
         PRIMARY KEY(shop_owner_id, user_id)
-    )
-    """)
+    )""")
 
-    # bans/restrictions per shop per user
     cur.execute("""
     CREATE TABLE IF NOT EXISTS user_bans(
         shop_owner_id INTEGER NOT NULL,
@@ -210,10 +167,8 @@ def init_db() -> None:
         banned INTEGER DEFAULT 0,
         restricted_until INTEGER DEFAULT 0,
         PRIMARY KEY(shop_owner_id, user_id)
-    )
-    """)
+    )""")
 
-    # catalog hierarchy
     cur.execute("""
     CREATE TABLE IF NOT EXISTS categories(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -221,9 +176,9 @@ def init_db() -> None:
         name TEXT NOT NULL,
         description TEXT DEFAULT '',
         file_id TEXT DEFAULT '',
-        file_type TEXT DEFAULT '' -- photo/video
-    )
-    """)
+        file_type TEXT DEFAULT ''
+    )""")
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS cocategories(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -233,8 +188,8 @@ def init_db() -> None:
         description TEXT DEFAULT '',
         file_id TEXT DEFAULT '',
         file_type TEXT DEFAULT ''
-    )
-    """)
+    )""")
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS products(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -247,8 +202,8 @@ def init_db() -> None:
         file_id TEXT DEFAULT '',
         file_type TEXT DEFAULT '',
         tg_link TEXT DEFAULT ''
-    )
-    """)
+    )""")
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS product_keys(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -258,10 +213,8 @@ def init_db() -> None:
         delivered_once INTEGER DEFAULT 0,
         delivered_to INTEGER DEFAULT 0,
         delivered_at INTEGER DEFAULT 0
-    )
-    """)
+    )""")
 
-    # deposits
     cur.execute("""
     CREATE TABLE IF NOT EXISTS deposit_requests(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -275,10 +228,8 @@ def init_db() -> None:
         handled_at INTEGER DEFAULT 0,
         admin_chat_id INTEGER DEFAULT 0,
         admin_msg_id INTEGER DEFAULT 0
-    )
-    """)
+    )""")
 
-    # support tickets
     cur.execute("""
     CREATE TABLE IF NOT EXISTS tickets(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -287,8 +238,8 @@ def init_db() -> None:
         status TEXT NOT NULL, -- open/closed
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
-    )
-    """)
+    )""")
+
     cur.execute("""
     CREATE TABLE IF NOT EXISTS ticket_messages(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -296,10 +247,8 @@ def init_db() -> None:
         sender_id INTEGER NOT NULL,
         text TEXT NOT NULL,
         created_at INTEGER NOT NULL
-    )
-    """)
+    )""")
 
-    # history/ledger
     cur.execute("""
     CREATE TABLE IF NOT EXISTS transactions(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -310,29 +259,27 @@ def init_db() -> None:
         note TEXT DEFAULT '',
         qty INTEGER DEFAULT 1,
         created_at INTEGER NOT NULL
-    )
-    """)
+    )""")
 
-    conn.commit()
-    conn.close()
+    conn.commit(); conn.close()
 
     ensure_shop_settings(SUPER_ADMIN_ID)
     s = get_shop_settings(SUPER_ADMIN_ID)
     if not (s["welcome_text"] or "").strip():
-        set_shop_setting(SUPER_ADMIN_ID, "welcome_text", f"✅ Welcome to <b>{esc(STORE_NAME)}</b>\nGet your 24/7 Store Panel Here !!\n\nBot created by @RekkoOwn")
+        set_shop_setting(SUPER_ADMIN_ID, "welcome_text",
+            f"✅ Welcome to <b>{esc(STORE_NAME)}</b>\nGet your 24/7 Store Panel Here !!\n\nBot created by @RekkoOwn"
+        )
     if not (s["connect_desc"] or "").strip():
-        set_shop_setting(
-            SUPER_ADMIN_ID,
-            "connect_desc",
+        set_shop_setting(SUPER_ADMIN_ID, "connect_desc",
             "🤖 <b>Connect My Bot</b>\n\n"
             "Create your own bot at @BotFather, then connect your token here.\n"
-            "You must deposit to Main Shop wallet first.\n\n"
+            "Deposit to Main Shop wallet first.\n\n"
             f"Plan A: <b>{money(PLAN_A_PRICE)} {esc(CURRENCY)}</b> / {PLAN_DAYS} days (Branded welcome)\n"
-            f"Plan B: <b>{money(PLAN_B_PRICE)} {esc(CURRENCY)}</b> / {PLAN_DAYS} days (White‑Label)\n"
+            f"Plan B: <b>{money(PLAN_B_PRICE)} {esc(CURRENCY)}</b> / {PLAN_DAYS} days (White-Label)\n"
         )
 
 # --- settings ---
-def ensure_shop_settings(shop_owner_id: int) -> None:
+def ensure_shop_settings(shop_owner_id: int):
     conn = db(); cur = conn.cursor()
     cur.execute("SELECT 1 FROM shop_settings WHERE shop_owner_id=?", (shop_owner_id,))
     if not cur.fetchone():
@@ -349,14 +296,14 @@ def get_shop_settings(shop_owner_id: int) -> sqlite3.Row:
     r = cur.fetchone(); conn.close()
     return r
 
-def set_shop_setting(shop_owner_id: int, field: str, value: str) -> None:
+def set_shop_setting(shop_owner_id: int, field: str, value: str):
     ensure_shop_settings(shop_owner_id)
     conn = db(); cur = conn.cursor()
     cur.execute(f"UPDATE shop_settings SET {field}=? WHERE shop_owner_id=?", (value or "", shop_owner_id))
     conn.commit(); conn.close()
 
 # --- users ---
-def upsert_user(u) -> None:
+def upsert_user(u):
     conn = db(); cur = conn.cursor()
     cur.execute(
         "INSERT INTO users(user_id, username, first_name, last_name, last_seen) VALUES(?,?,?,?,?) "
@@ -382,7 +329,7 @@ def user_display(uid: int) -> str:
     return name or str(uid)
 
 # --- session (master only) ---
-def set_session(uid: int, shop_owner_id: int, locked: int) -> None:
+def set_session(uid: int, shop_owner_id: int, locked: int):
     conn = db(); cur = conn.cursor()
     cur.execute(
         "INSERT INTO sessions(user_id, shop_owner_id, locked) VALUES(?,?,?) "
@@ -391,16 +338,8 @@ def set_session(uid: int, shop_owner_id: int, locked: int) -> None:
     )
     conn.commit(); conn.close()
 
-def get_session(uid: int) -> Tuple[int, int]:
-    conn = db(); cur = conn.cursor()
-    cur.execute("SELECT shop_owner_id, locked FROM sessions WHERE user_id=?", (uid,))
-    r = cur.fetchone(); conn.close()
-    if not r:
-        return SUPER_ADMIN_ID, 0
-    return int(r["shop_owner_id"]), int(r["locked"] or 0)
-
 # --- balances ---
-def ensure_balance(shop_owner_id: int, uid: int) -> None:
+def ensure_balance(shop_owner_id: int, uid: int):
     conn = db(); cur = conn.cursor()
     cur.execute("INSERT OR IGNORE INTO balances(shop_owner_id, user_id, balance) VALUES(?,?,0)", (shop_owner_id, uid))
     conn.commit(); conn.close()
@@ -412,7 +351,7 @@ def get_balance(shop_owner_id: int, uid: int) -> float:
     r = cur.fetchone(); conn.close()
     return float(r["balance"] or 0) if r else 0.0
 
-def set_balance(shop_owner_id: int, uid: int, val: float) -> None:
+def set_balance(shop_owner_id: int, uid: int, val: float):
     conn = db(); cur = conn.cursor()
     cur.execute(
         "INSERT INTO balances(shop_owner_id, user_id, balance) VALUES(?,?,?) "
@@ -429,11 +368,11 @@ def add_balance(shop_owner_id: int, uid: int, delta: float) -> float:
 
 def list_shop_user_ids(shop_owner_id: int) -> List[int]:
     conn = db(); cur = conn.cursor()
-    cur.execute("SELECT user_id FROM balances WHERE shop_owner_id=?", (shop_owner_id,))
+    cur.execute("SELECT user_id FROM balances WHERE shop_owner_id=? ORDER BY rowid DESC", (shop_owner_id,))
     rows = cur.fetchall(); conn.close()
     return [int(r["user_id"]) for r in rows]
 
-def log_tx(shop_owner_id: int, uid: int, kind: str, amount: float, note: str = "", qty: int = 1) -> None:
+def log_tx(shop_owner_id: int, uid: int, kind: str, amount: float, note: str = "", qty: int = 1):
     conn = db(); cur = conn.cursor()
     cur.execute("INSERT INTO transactions(shop_owner_id,user_id,kind,amount,note,qty,created_at) VALUES(?,?,?,?,?,?,?)",
                 (shop_owner_id, uid, kind, float(amount), note or "", int(qty or 1), ts()))
@@ -452,14 +391,14 @@ def is_banned_user(shop_owner_id: int, uid: int) -> bool:
         return True
     return False
 
-def ban_user(shop_owner_id: int, uid: int, banned: int) -> None:
+def ban_user(shop_owner_id: int, uid: int, banned: int):
     conn = db(); cur = conn.cursor()
     cur.execute("""INSERT INTO user_bans(shop_owner_id,user_id,banned,restricted_until) VALUES(?,?,?,0)
                    ON CONFLICT(shop_owner_id,user_id) DO UPDATE SET banned=excluded.banned""",
                 (shop_owner_id, uid, int(banned)))
     conn.commit(); conn.close()
 
-def restrict_user(shop_owner_id: int, uid: int, days: int) -> None:
+def restrict_user(shop_owner_id: int, uid: int, days: int):
     until = ts() + max(0, int(days)) * 86400
     conn = db(); cur = conn.cursor()
     cur.execute("""INSERT INTO user_bans(shop_owner_id,user_id,banned,restricted_until) VALUES(?,?,0,?)
@@ -468,7 +407,7 @@ def restrict_user(shop_owner_id: int, uid: int, days: int) -> None:
     conn.commit(); conn.close()
 
 # --- sellers / plans ---
-def ensure_seller(seller_id: int) -> None:
+def ensure_seller(seller_id: int):
     conn = db(); cur = conn.cursor()
     cur.execute("INSERT OR IGNORE INTO sellers(seller_id, sub_until, plan) VALUES(?,?,?)", (seller_id, 0, "branded"))
     conn.commit(); conn.close()
@@ -485,7 +424,7 @@ def seller_plan(seller_id: int) -> str:
     r = seller_row(seller_id)
     return (r["plan"] if r else "branded") or "branded"
 
-def seller_set_plan(seller_id: int, plan: str) -> None:
+def seller_set_plan(seller_id: int, plan: str):
     ensure_seller(seller_id)
     conn = db(); cur = conn.cursor()
     cur.execute("UPDATE sellers SET plan=? WHERE seller_id=?", (plan, seller_id))
@@ -511,36 +450,41 @@ def seller_active(seller_id: int) -> bool:
         return False
     return int(r["sub_until"] or 0) > ts()
 
-def seller_add_days(seller_id: int, days: int) -> None:
+def seller_add_days(seller_id: int, days: int):
     ensure_seller(seller_id)
     conn = db(); cur = conn.cursor()
     cur.execute("SELECT sub_until FROM sellers WHERE seller_id=?", (seller_id,))
     r = cur.fetchone()
     base = max(int(r["sub_until"] or 0), ts())
-    cur.execute("UPDATE sellers SET sub_until=? WHERE seller_id=?", (base + int(days)*86400, seller_id))
+    cur.execute("UPDATE sellers SET sub_until=? WHERE seller_id=?", (base + int(days) * 86400, seller_id))
     conn.commit(); conn.close()
 
-def super_set_seller_flag(seller_id: int, field: str, val: int) -> None:
+def super_set_seller_flag(seller_id: int, field: str, val: int):
     ensure_seller(seller_id)
     conn = db(); cur = conn.cursor()
     cur.execute(f"UPDATE sellers SET {field}=? WHERE seller_id=?", (int(val), seller_id))
     conn.commit(); conn.close()
 
-def super_restrict_seller(seller_id: int, days: int) -> None:
+def super_restrict_seller(seller_id: int, days: int):
     ensure_seller(seller_id)
     until = ts() + max(0, int(days)) * 86400
     conn = db(); cur = conn.cursor()
     cur.execute("UPDATE sellers SET restricted_until=? WHERE seller_id=?", (until, seller_id))
     conn.commit(); conn.close()
 
-def list_sellers() -> List[sqlite3.Row]:
+def list_sellers_only() -> List[sqlite3.Row]:
+    # ONLY real sellers: has subscription OR has connected bot token
     conn = db(); cur = conn.cursor()
-    cur.execute("SELECT * FROM sellers ORDER BY sub_until DESC")
+    cur.execute("""
+        SELECT s.* FROM sellers s
+        WHERE s.sub_until>0 OR EXISTS(SELECT 1 FROM seller_bots b WHERE b.seller_id=s.seller_id)
+        ORDER BY s.sub_until DESC
+    """)
     rows = cur.fetchall(); conn.close()
     return rows
 
 # --- seller bots ---
-def upsert_seller_bot(seller_id: int, token: str, username: str) -> None:
+def upsert_seller_bot(seller_id: int, token: str, username: str):
     ensure_seller(seller_id)
     conn = db(); cur = conn.cursor()
     cur.execute("""
@@ -563,36 +507,48 @@ def list_enabled_seller_bots() -> List[sqlite3.Row]:
     rows = cur.fetchall(); conn.close()
     return rows
 
-def disable_seller_bot(seller_id: int) -> None:
+def disable_seller_bot(seller_id: int):
     conn = db(); cur = conn.cursor()
     cur.execute("UPDATE seller_bots SET enabled=0, updated_at=? WHERE seller_id=?", (ts(), seller_id))
     conn.commit(); conn.close()
 
-# --- catalog ---
-def list_categories(shop_owner_id: int) -> List[sqlite3.Row]:
+# --- catalog helpers ---
+def cat_get(shop_owner_id: int, cid: int) -> Optional[sqlite3.Row]:
+    conn = db(); cur = conn.cursor()
+    cur.execute("SELECT * FROM categories WHERE shop_owner_id=? AND id=?", (shop_owner_id, cid))
+    r = cur.fetchone(); conn.close()
+    return r
+
+def cocat_get(shop_owner_id: int, sid: int) -> Optional[sqlite3.Row]:
+    conn = db(); cur = conn.cursor()
+    cur.execute("SELECT * FROM cocategories WHERE shop_owner_id=? AND id=?", (shop_owner_id, sid))
+    r = cur.fetchone(); conn.close()
+    return r
+
+def prod_get(shop_owner_id: int, pid: int) -> Optional[sqlite3.Row]:
+    conn = db(); cur = conn.cursor()
+    cur.execute("SELECT * FROM products WHERE shop_owner_id=? AND id=?", (shop_owner_id, pid))
+    r = cur.fetchone(); conn.close()
+    return r
+
+def cat_list(shop_owner_id: int) -> List[sqlite3.Row]:
     conn = db(); cur = conn.cursor()
     cur.execute("SELECT * FROM categories WHERE shop_owner_id=? ORDER BY id DESC", (shop_owner_id,))
     rows = cur.fetchall(); conn.close()
     return rows
 
-def list_cocats(shop_owner_id: int, cat_id: int) -> List[sqlite3.Row]:
+def cocat_list(shop_owner_id: int, cat_id: int) -> List[sqlite3.Row]:
     conn = db(); cur = conn.cursor()
     cur.execute("SELECT * FROM cocategories WHERE shop_owner_id=? AND category_id=? ORDER BY id DESC", (shop_owner_id, cat_id))
     rows = cur.fetchall(); conn.close()
     return rows
 
-def list_products(shop_owner_id: int, cat_id: int, cocat_id: int) -> List[sqlite3.Row]:
+def prod_list(shop_owner_id: int, cat_id: int, cocat_id: int) -> List[sqlite3.Row]:
     conn = db(); cur = conn.cursor()
     cur.execute("SELECT * FROM products WHERE shop_owner_id=? AND category_id=? AND cocategory_id=? ORDER BY id DESC",
                 (shop_owner_id, cat_id, cocat_id))
     rows = cur.fetchall(); conn.close()
     return rows
-
-def get_product(shop_owner_id: int, pid: int) -> Optional[sqlite3.Row]:
-    conn = db(); cur = conn.cursor()
-    cur.execute("SELECT * FROM products WHERE shop_owner_id=? AND id=?", (shop_owner_id, pid))
-    r = cur.fetchone(); conn.close()
-    return r
 
 def stock_count(shop_owner_id: int, pid: int) -> int:
     conn = db(); cur = conn.cursor()
@@ -601,12 +557,28 @@ def stock_count(shop_owner_id: int, pid: int) -> int:
     r = cur.fetchone(); conn.close()
     return int(r["c"] or 0) if r else 0
 
+def add_keys(shop_owner_id: int, pid: int, lines: List[str]) -> int:
+    lines = [l.strip() for l in lines if l.strip()]
+    if not lines:
+        return 0
+    conn = db(); cur = conn.cursor()
+    cur.executemany("INSERT INTO product_keys(shop_owner_id,product_id,key_line) VALUES(?,?,?)",
+                    [(shop_owner_id, pid, l) for l in lines])
+    conn.commit()
+    n = cur.rowcount
+    conn.close()
+    return n
+
+def clear_keys(shop_owner_id: int, pid: int):
+    conn = db(); cur = conn.cursor()
+    cur.execute("DELETE FROM product_keys WHERE shop_owner_id=? AND product_id=? AND delivered_once=0", (shop_owner_id, pid))
+    conn.commit(); conn.close()
+
 def pop_keys(shop_owner_id: int, pid: int, uid: int, qty: int) -> List[str]:
     conn = db(); cur = conn.cursor()
     cur.execute("""SELECT id, key_line FROM product_keys
                    WHERE shop_owner_id=? AND product_id=? AND delivered_once=0
-                   ORDER BY id ASC LIMIT ?""",
-                (shop_owner_id, pid, qty))
+                   ORDER BY id ASC LIMIT ?""", (shop_owner_id, pid, qty))
     rows = cur.fetchall()
     ids = [int(r["id"]) for r in rows]
     keys = [r["key_line"] for r in rows]
@@ -636,7 +608,7 @@ def create_ticket(shop_owner_id: int, user_id: int) -> int:
     conn.commit(); conn.close()
     return int(tid)
 
-def add_ticket_msg(ticket_id: int, sender_id: int, text: str) -> None:
+def add_ticket_msg(ticket_id: int, sender_id: int, text: str):
     conn = db(); cur = conn.cursor()
     cur.execute("INSERT INTO ticket_messages(ticket_id,sender_id,text,created_at) VALUES(?,?,?,?)",
                 (ticket_id, sender_id, text, ts()))
@@ -647,14 +619,13 @@ def add_ticket_msg(ticket_id: int, sender_id: int, text: str) -> None:
 def render_welcome_text(shop_owner_id: int) -> str:
     s = get_shop_settings(shop_owner_id)
     base = (s["welcome_text"] or "").strip()
-    # Seller shops: apply branding ONLY if branded or expired; remove if whitelabel active.
     if shop_owner_id != SUPER_ADMIN_ID:
+        # Seller shops: apply branding only if not whitelabel active
         if seller_active(shop_owner_id) and seller_plan(shop_owner_id) == "whitelabel":
             return base
         if BRAND_LINE not in base:
             return (base + "\n\n" + BRAND_LINE).strip()
         return base
-    # Master shop: you can edit the text freely (you can include branding yourself)
     return base
 
 # ---------------- MENUS ----------------
@@ -687,10 +658,7 @@ def seller_menu(uid: int, seller_id: int) -> InlineKeyboardMarkup:
         ]
     return grid(btns, 2)
 
-def back_menu_kb(bot_kind: str) -> InlineKeyboardMarkup:
-    return kb([[InlineKeyboardButton("⬅️ Main Menu", callback_data="m:menu")]])
-
-# ---------------- MULTI‑BOT MANAGER ----------------
+# ---------------- MULTI-BOT MANAGER ----------------
 class BotManager:
     def __init__(self):
         self.apps: Dict[int, Application] = {}
@@ -735,7 +703,6 @@ async def watchdog():
         try:
             for r in list_enabled_seller_bots():
                 sid = int(r["seller_id"])
-                # stop bot if inactive/banned/restricted/expired
                 if not seller_active(sid) or int(seller_row(sid)["banned_shop"] or 0) == 1:
                     disable_seller_bot(sid)
                     await MANAGER.stop_seller_bot(sid)
@@ -744,7 +711,7 @@ async def watchdog():
             log.exception("watchdog loop")
             await asyncio.sleep(60)
 
-# ---------------- USER STATE HELPERS ----------------
+# ---------------- STATE HELPERS ----------------
 def set_state(context: ContextTypes.DEFAULT_TYPE, key: str, data: Dict[str, Any]):
     context.user_data["state"] = key
     context.user_data["state_data"] = data
@@ -758,21 +725,28 @@ def clear_state(context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------- HANDLERS (REGISTER PER BOT) ----------------
 def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
-    # bot_kind: "master" or "seller"
-    async def send_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE, shop_id: int):
-        ensure_shop_settings(shop_id)
-        s = get_shop_settings(shop_id)
+    # bot_kind: master / seller
+
+    def current_shop_id() -> int:
+        return shop_owner_id if bot_kind == "seller" else SUPER_ADMIN_ID
+
+    async def show_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        uid = update.effective_user.id
+        sid = current_shop_id()
+        ensure_balance(sid, uid)
+
+        s = get_shop_settings(sid)
         file_id = (s["welcome_file_id"] or "").strip()
         ftype = (s["welcome_file_type"] or "").strip()
 
         if bot_kind == "seller":
-            title = f"🏬 <b>{esc(user_display(shop_id))} Shop</b>\n\n"
-            menu = seller_menu(update.effective_user.id, shop_id)
+            title = f"🏬 <b>{esc(user_display(sid))} Shop</b>\n\n"
+            menu = seller_menu(uid, sid)
         else:
             title = f"🏬 <b>{esc(STORE_NAME)}</b>\n\n"
-            menu = master_menu(update.effective_user.id)
+            menu = master_menu(uid)
 
-        text = render_welcome_text(shop_id)
+        text = render_welcome_text(sid)
         caption = title + (text or "")
 
         if file_id and ftype == "photo":
@@ -787,45 +761,49 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         uid = update.effective_user.id
 
         if bot_kind == "seller":
-            ensure_balance(shop_owner_id, uid)
-            await send_welcome(update, context, shop_owner_id)
+            await show_welcome(update, context)
             return
 
-        # master: lock session to master shop
+        # master session always master shop
         set_session(uid, SUPER_ADMIN_ID, 0)
-        ensure_balance(SUPER_ADMIN_ID, uid)
-        await send_welcome(update, context, SUPER_ADMIN_ID)
+        await show_welcome(update, context)
 
-        # start arguments
         arg = context.args[0] if context.args else ""
         if arg == "extend":
             await show_extend_master(update, context, uid)
 
     async def menu_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.callback_query:
-            await update.callback_query.answer()
-        clear_state(context)
+        # Make menu clean: delete the callback message if possible, then show buttons only.
+        q = update.callback_query
+        if q:
+            await q.answer()
+            # cancel current state and delete previous command message
+            clear_state(context)
+            try:
+                await safe_delete(context.bot, q.message.chat_id, q.message.message_id)
+            except Exception:
+                pass
+
         uid = update.effective_user.id
         if bot_kind == "seller":
-            await context.bot.send_message(update.effective_chat.id, "Main Menu:", reply_markup=seller_menu(uid, shop_owner_id))
+            await context.bot.send_message(update.effective_chat.id, "Choose:", reply_markup=seller_menu(uid, shop_owner_id))
         else:
-            await context.bot.send_message(update.effective_chat.id, "Main Menu:", reply_markup=master_menu(uid))
+            await context.bot.send_message(update.effective_chat.id, "Choose:", reply_markup=master_menu(uid))
 
-    # ---------- Products ----------
-    def current_shop_id() -> int:
-        return shop_owner_id if bot_kind == "seller" else SUPER_ADMIN_ID
-
+    # ---------- Products (Category -> Sub -> Product) ----------
     async def products_root(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         sid = current_shop_id()
         uid = update.effective_user.id
         if is_banned_user(sid, uid):
-            await update.callback_query.message.reply_text("❌ You are restricted from this shop.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("❌ You are restricted from this shop.")
             return
-        cats = list_categories(sid)
+
+        cats = cat_list(sid)
         if not cats:
-            await update.callback_query.message.reply_text("No categories yet.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("No categories yet.", reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]]))
             return
+
         rows = [[InlineKeyboardButton(c["name"], callback_data=f"p:cat:{c['id']}")] for c in cats[:50]]
         rows.append([InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")])
         await update.callback_query.message.reply_text("Select Category:", reply_markup=kb(rows))
@@ -835,12 +813,12 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         sid = current_shop_id()
         uid = update.effective_user.id
         if is_banned_user(sid, uid):
-            await update.callback_query.message.reply_text("❌ You are restricted from this shop.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("❌ You are restricted from this shop.")
             return
         cat_id = int(update.callback_query.data.split(":")[2])
-        subs = list_cocats(sid, cat_id)
+        subs = cocat_list(sid, cat_id)
         if not subs:
-            await update.callback_query.message.reply_text("No sub-categories yet.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("No sub-categories yet.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data="m:products")],[InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]]))
             return
         rows = [[InlineKeyboardButton(sc["name"], callback_data=f"p:sub:{cat_id}:{sc['id']}")] for sc in subs[:50]]
         rows.append([InlineKeyboardButton("⬅️ Back", callback_data="m:products"), InlineKeyboardButton("🏠 Menu", callback_data="m:menu")])
@@ -851,11 +829,11 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         sid = current_shop_id()
         uid = update.effective_user.id
         if is_banned_user(sid, uid):
-            await update.callback_query.message.reply_text("❌ You are restricted from this shop.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("❌ You are restricted from this shop.")
             return
         _, _, _, cat_s, sub_s = update.callback_query.data.split(":")
         cat_id = int(cat_s); sub_id = int(sub_s)
-        prods = list_products(sid, cat_id, sub_id)
+        prods = prod_list(sid, cat_id, sub_id)
         if not prods:
             await update.callback_query.message.reply_text("No products yet.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"p:cat:{cat_id}")],[InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]]))
             return
@@ -867,15 +845,18 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         await update.callback_query.answer()
         sid = current_shop_id()
         pid = int(update.callback_query.data.split(":")[2])
-        p = get_product(sid, pid)
+        p = prod_get(sid, pid)
         if not p:
-            await update.callback_query.message.reply_text("Product not found.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("Product not found.")
             return
+
         stock = stock_count(sid, pid)
         price = float(p["price"])
-        qty = int(context.user_data.get(f"qty_{sid}_{pid}", 1))
+        qty_key = f"qty_{sid}_{pid}"
+        qty = int(context.user_data.get(qty_key, 1))
         qty = max(1, qty)
         total = price * qty
+
         desc = (p["description"] or "").strip()
         text = (
             f"<b>{esc(p['name'])}</b>\n\n"
@@ -892,8 +873,9 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
              InlineKeyboardButton("➕", callback_data=f"p:q:+:{pid}"),
              InlineKeyboardButton("✅ Buy", callback_data=f"p:buy:{pid}")],
             [InlineKeyboardButton("⬅️ Back", callback_data=f"p:sub:{p['category_id']}:{p['cocategory_id']}")],
-            [InlineKeyboardButton("🏠 Menu", callback_data="m:menu")],
+            [InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]
         ]
+
         file_id = (p["file_id"] or "").strip()
         ftype = (p["file_type"] or "").strip()
         if file_id and ftype == "photo":
@@ -915,35 +897,39 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         else:
             cur = max(1, cur - 1)
         context.user_data[key] = cur
-        await update.callback_query.message.reply_text("✅ Updated quantity.", reply_markup=kb([[InlineKeyboardButton("View Product", callback_data=f"p:prod:{pid}")]]))
+        await update.callback_query.message.reply_text("✅ Quantity updated.", reply_markup=kb([[InlineKeyboardButton("🔄 Refresh", callback_data=f"p:prod:{pid}")]]))
 
     async def product_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         sid = current_shop_id()
         uid = update.effective_user.id
         if is_banned_user(sid, uid):
-            await update.callback_query.message.reply_text("❌ You are restricted from this shop.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("❌ You are restricted from this shop.")
             return
         pid = int(update.callback_query.data.split(":")[2])
-        p = get_product(sid, pid)
+        p = prod_get(sid, pid)
         if not p:
-            await update.callback_query.message.reply_text("Product not found.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("Product not found.")
             return
+
         qty = int(context.user_data.get(f"qty_{sid}_{pid}", 1))
         qty = max(1, qty)
+
         stock = stock_count(sid, pid)
         if stock < qty:
-            await update.callback_query.message.reply_text("❌ Out of stock / not enough stock.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("❌ Out of stock / not enough stock.")
             return
+
         price = float(p["price"])
         total = price * qty
         bal = get_balance(sid, uid)
         if bal < total:
-            await update.callback_query.message.reply_text(f"❌ Not enough balance.\nBalance: {money(bal)} {esc(CURRENCY)}", parse_mode=ParseMode.HTML, reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text(f"❌ Not enough balance.\nBalance: {money(bal)} {esc(CURRENCY)}", parse_mode=ParseMode.HTML)
             return
 
         set_balance(sid, uid, bal - total)
         log_tx(sid, uid, "purchase", -total, p["name"], qty)
+
         keys = pop_keys(sid, pid, uid, qty)
         link = (p["tg_link"] or "").strip()
 
@@ -954,19 +940,21 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             f"Paid: <b>{money(total)} {esc(CURRENCY)}</b>\n\n"
             f"<b>Key(s):</b>\n" + "\n".join([f"<code>{esc(k)}</code>" for k in keys])
         )
+
         rows = []
         if link:
             rows.append([InlineKeyboardButton("📦 Get File", callback_data=f"p:file:{pid}")])
         rows.append([InlineKeyboardButton("🏠 Menu", callback_data="m:menu")])
+
         await update.callback_query.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
 
-        # notifications
+        # notify
         try:
             if bot_kind == "seller":
-                await context.bot.send_message(chat_id=shop_owner_id, text=f"🔔 New purchase\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}")
-                await context.bot.send_message(chat_id=SUPER_ADMIN_ID, text=f"🔔 Seller purchase\nSeller: {user_display(shop_owner_id)}\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}")
+                await context.bot.send_message(shop_owner_id, f"🔔 New purchase\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}")
+                await context.bot.send_message(SUPER_ADMIN_ID, f"🔔 Seller purchase\nSeller: {user_display(shop_owner_id)}\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}")
             else:
-                await context.bot.send_message(chat_id=SUPER_ADMIN_ID, text=f"🔔 Main shop purchase\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}")
+                await context.bot.send_message(SUPER_ADMIN_ID, f"🔔 Main shop purchase\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}")
         except Exception:
             pass
 
@@ -974,15 +962,15 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         await update.callback_query.answer()
         sid = current_shop_id()
         pid = int(update.callback_query.data.split(":")[2])
-        p = get_product(sid, pid)
+        p = prod_get(sid, pid)
         if not p:
-            await update.callback_query.message.reply_text("Not found.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("Not found.")
             return
         link = (p["tg_link"] or "").strip()
         if not link:
-            await update.callback_query.message.reply_text("No private link set.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("No private link set.")
             return
-        await update.callback_query.message.reply_text(f"📦 <b>Private Link</b>\n{esc(link)}", parse_mode=ParseMode.HTML, reply_markup=back_menu_kb(bot_kind))
+        await update.callback_query.message.reply_text(f"📦 <b>Private Link</b>\n{esc(link)}", parse_mode=ParseMode.HTML, reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]]))
 
     # ---------- Wallet / Deposit ----------
     async def wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -990,7 +978,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         sid = current_shop_id()
         uid = update.effective_user.id
         if is_banned_user(sid, uid):
-            await update.callback_query.message.reply_text("❌ You are restricted from this shop.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("❌ You are restricted from this shop.")
             return
         s = get_shop_settings(sid)
         bal = get_balance(sid, uid)
@@ -1008,7 +996,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         await update.callback_query.answer()
         sid = current_shop_id()
         set_state(context, "deposit_amount", {"shop_id": sid})
-        await update.callback_query.message.reply_text("Send deposit amount (example: 10):", reply_markup=back_menu_kb(bot_kind))
+        await update.callback_query.message.reply_text("Send deposit amount (example: 10):", reply_markup=kb([[InlineKeyboardButton("⬅️ Cancel", callback_data="m:menu")]]))
 
     async def deposit_amount_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state, data = get_state(context)
@@ -1037,13 +1025,13 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         cur.execute("""INSERT INTO deposit_requests(shop_owner_id,user_id,amount,proof_file_id,status,created_at)
                        VALUES(?,?,?,?,?,?)""",
                     (sid, uid, amt, file_id, "pending", ts()))
-        req_id = cur.lastrowid
+        req_id = int(cur.lastrowid)
         conn.commit(); conn.close()
 
         clear_state(context)
-        await update.message.reply_text("✅ Deposit submitted. Waiting for approval.", reply_markup=back_menu_kb(bot_kind))
+        await update.message.reply_text("✅ Deposit submitted. Waiting for approval.", reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]]))
 
-        # send to shop owner (not super admin for seller shop)
+        # send to shop owner (master -> super; seller -> seller owner)
         owner_chat = sid if sid != SUPER_ADMIN_ID else SUPER_ADMIN_ID
         try:
             m = await context.bot.send_photo(
@@ -1066,6 +1054,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         await update.callback_query.answer()
         _, decision, rid_s = update.callback_query.data.split(":")
         rid = int(rid_s)
+
         conn = db(); cur = conn.cursor()
         cur.execute("SELECT * FROM deposit_requests WHERE id=?", (rid,))
         r = cur.fetchone()
@@ -1073,10 +1062,10 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             conn.close()
             await update.callback_query.message.reply_text("Request not found.")
             return
+
         sid = int(r["shop_owner_id"])
-        uid = update.effective_user.id
-        # permission: shop owner only (or super admin for master shop)
-        if not ((uid == sid) or (sid == SUPER_ADMIN_ID and is_super(uid))):
+        me = update.effective_user.id
+        if not ((me == sid) or (sid == SUPER_ADMIN_ID and is_super(me))):
             conn.close()
             await update.callback_query.message.reply_text("❌ Not allowed.")
             return
@@ -1087,27 +1076,27 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
 
         user_id = int(r["user_id"])
         amt = float(r["amount"])
+
         if decision == "ok":
             add_balance(sid, user_id, amt)
             log_tx(sid, user_id, "deposit", amt, "")
             cur.execute("UPDATE deposit_requests SET status='approved', handled_by=?, handled_at=? WHERE id=?",
-                        (uid, ts(), rid))
+                        (me, ts(), rid))
             conn.commit(); conn.close()
             try:
-                await context.bot.send_message(chat_id=user_id,
-                                               text=f"✅ Deposited: {money(amt)} {CURRENCY}\nTotal Balance: {money(get_balance(sid, user_id))} {CURRENCY}")
+                await context.bot.send_message(user_id, f"✅ Deposited: {money(amt)} {CURRENCY}\nTotal Balance: {money(get_balance(sid, user_id))} {CURRENCY}")
             except Exception:
                 pass
         else:
             cur.execute("UPDATE deposit_requests SET status='rejected', handled_by=?, handled_at=? WHERE id=?",
-                        (uid, ts(), rid))
+                        (me, ts(), rid))
             conn.commit(); conn.close()
             try:
-                await context.bot.send_message(chat_id=user_id, text=f"❌ Deposit Rejected: {money(amt)} {CURRENCY}")
+                await context.bot.send_message(user_id, f"❌ Deposit Rejected: {money(amt)} {CURRENCY}")
             except Exception:
                 pass
 
-        # delete admin message
+        # delete admin request message
         try:
             await safe_delete(context.bot, int(r["admin_chat_id"]), int(r["admin_msg_id"]))
         except Exception:
@@ -1119,50 +1108,49 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         sid = current_shop_id()
         uid = update.effective_user.id
         if is_banned_user(sid, uid):
-            await update.callback_query.message.reply_text("❌ You are restricted from this shop.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("❌ You are restricted from this shop.")
             return
         conn = db(); cur = conn.cursor()
         cur.execute("SELECT * FROM transactions WHERE shop_owner_id=? AND user_id=? ORDER BY id DESC LIMIT 30", (sid, uid))
         rows = cur.fetchall(); conn.close()
         bal = get_balance(sid, uid)
-        if not rows:
-            await update.callback_query.message.reply_text(f"📜 <b>History</b>\n\nNo history yet.\n\nTotal Balance: <b>{money(bal)} {esc(CURRENCY)}</b>",
-                                                          parse_mode=ParseMode.HTML, reply_markup=back_menu_kb(bot_kind))
-            return
         lines = ["📜 <b>History</b>\n"]
-        for r in rows:
-            kind = r["kind"]
-            amt = float(r["amount"] or 0)
-            note = (r["note"] or "").strip()
-            qty = int(r["qty"] or 1)
-            if kind == "deposit":
-                lines.append(f"✅ Deposited: <b>{money(amt)} {esc(CURRENCY)}</b>")
-            elif kind == "purchase":
-                lines.append(f"🛒 Purchased: <b>{esc(note)}</b> (x{qty}) — <b>{money(abs(amt))} {esc(CURRENCY)}</b>")
-            elif kind == "balance_edit":
-                sign = "+" if amt >= 0 else "-"
-                lines.append(f"⚙️ Balance {sign}: <b>{money(abs(amt))} {esc(CURRENCY)}</b>")
-            elif kind == "plan":
-                lines.append(f"🤖 Plan: <b>{esc(note)}</b> — <b>{money(abs(amt))} {esc(CURRENCY)}</b>")
-            else:
-                lines.append(f"{esc(kind)}: <b>{money(amt)} {esc(CURRENCY)}</b>")
+        if not rows:
+            lines.append("No history yet.")
+        else:
+            for r in rows:
+                kind = r["kind"]
+                amt = float(r["amount"] or 0)
+                note = (r["note"] or "").strip()
+                qty = int(r["qty"] or 1)
+                if kind == "deposit":
+                    lines.append(f"✅ Deposited: <b>{money(amt)} {esc(CURRENCY)}</b>")
+                elif kind == "purchase":
+                    lines.append(f"🛒 Purchased: <b>{esc(note)}</b> (x{qty}) — <b>{money(abs(amt))} {esc(CURRENCY)}</b>")
+                elif kind == "balance_edit":
+                    sign = "+" if amt >= 0 else "-"
+                    lines.append(f"⚙️ Balance {sign}: <b>{money(abs(amt))} {esc(CURRENCY)}</b>")
+                elif kind == "plan":
+                    lines.append(f"🤖 Plan: <b>{esc(note)}</b> — <b>{money(abs(amt))} {esc(CURRENCY)}</b>")
+                else:
+                    lines.append(f"{esc(kind)}: <b>{money(amt)} {esc(CURRENCY)}</b>")
         lines.append(f"\nTotal Balance: <b>{money(bal)} {esc(CURRENCY)}</b>")
-        await update.callback_query.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=back_menu_kb(bot_kind))
+        await update.callback_query.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]]))
 
-    # ---------- Support ----------
+    # ---------- Support (draft -> DONE) ----------
     async def support_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         sid = current_shop_id()
         uid = update.effective_user.id
         if is_banned_user(sid, uid):
-            await update.callback_query.message.reply_text("❌ You are restricted from this shop.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("❌ You are restricted from this shop.")
             return
         set_state(context, "support_draft", {"shop_id": sid, "text": ""})
         await update.callback_query.message.reply_text(
-            "Type your support message. When finished, press DONE.",
+            "Type your support message. Press DONE when finished.",
             reply_markup=kb([
                 [InlineKeyboardButton("✅ DONE", callback_data="s:done")],
-                [InlineKeyboardButton("⬅️ Cancel", callback_data="m:menu")]
+                [InlineKeyboardButton("❌ Cancel", callback_data="m:menu")]
             ])
         )
 
@@ -1175,33 +1163,32 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return
         data["text"] = (data.get("text", "") + ("\n" if data.get("text") else "") + t)[:3500]
         set_state(context, "support_draft", data)
-        await update.message.reply_text("Added. Press DONE when finished.", reply_markup=kb([[InlineKeyboardButton("✅ DONE", callback_data="s:done")]]))
+        await update.message.reply_text("Added. Press DONE.", reply_markup=kb([[InlineKeyboardButton("✅ DONE", callback_data="s:done")]]))
 
     async def support_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         state, data = get_state(context)
         if state != "support_draft":
-            await update.callback_query.message.reply_text("No draft.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("No draft.", reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]]))
             return
         sid = int(data["shop_id"])
         uid = update.effective_user.id
         text = (data.get("text") or "").strip()
         if not text:
-            await update.callback_query.message.reply_text("Send a message first.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("Send a message first.")
             return
         clear_state(context)
-        tid = get_open_ticket(sid, uid)
-        if not tid:
-            tid = create_ticket(sid, uid)
-        add_ticket_msg(tid, uid, text)
-        await update.callback_query.message.reply_text("✅ Sent to support.", reply_markup=back_menu_kb(bot_kind))
 
-        # notify owner (no super admin id shown)
+        tid = get_open_ticket(sid, uid) or create_ticket(sid, uid)
+        add_ticket_msg(tid, uid, text)
+
+        await update.callback_query.message.reply_text("✅ Sent to support.", reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]]))
+
         owner = sid if sid != SUPER_ADMIN_ID else SUPER_ADMIN_ID
         try:
             await context.bot.send_message(
-                chat_id=owner,
-                text=f"🆘 <b>Support Ticket</b>\nUser: {esc(user_display(uid))}\n\n{esc(text)}",
+                owner,
+                f"🆘 <b>Support Ticket</b>\nShop: <b>{esc(user_display(sid) if sid!=SUPER_ADMIN_ID else STORE_NAME)}</b>\nUser: {esc(user_display(uid))}\n\n{esc(text)}",
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb([[InlineKeyboardButton("↩️ Reply", callback_data=f"a:reply:{uid}:{sid}")]])
             )
@@ -1213,7 +1200,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         _, _, uid_s, sid_s = update.callback_query.data.split(":")
         target_uid = int(uid_s)
         sid = int(sid_s)
-        # only shop owner can reply (or super admin for master shop)
         me = update.effective_user.id
         if not ((me == sid) or (sid == SUPER_ADMIN_ID and is_super(me))):
             await update.callback_query.message.reply_text("❌ Not allowed.")
@@ -1232,16 +1218,19 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return
         clear_state(context)
         try:
-            await context.bot.send_message(chat_id=target_uid, text=f"✅ Support Reply:\n\n{text}")
+            await context.bot.send_message(target_uid, f"✅ Support Reply:\n\n{text}")
         except Exception:
             pass
-        await update.message.reply_text("✅ Replied.", reply_markup=back_menu_kb(bot_kind))
+        # log in ticket
+        tid = get_open_ticket(sid, target_uid) or create_ticket(sid, target_uid)
+        add_ticket_msg(tid, update.effective_user.id, text)
+        await update.message.reply_text("✅ Replied.", reply_markup=kb([[InlineKeyboardButton("⬅️ Admin", callback_data="m:admin")]]))
 
     # ---------- Connect My Bot (master only) ----------
     async def connect_screen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         if bot_kind != "master":
-            await update.callback_query.message.reply_text("This is only available in Main Shop.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("This is only available in Main Shop.", reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]]))
             return
         uid = update.effective_user.id
         ensure_seller(uid)
@@ -1250,6 +1239,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         bal = get_balance(SUPER_ADMIN_ID, uid)
         cur_plan = seller_plan(uid)
         days_left = seller_days_left(uid)
+
         txt = f"{desc}\n\nYour Main Shop balance: <b>{money(bal)} {esc(CURRENCY)}</b>\nYour plan: <b>{esc(cur_plan)}</b>\nDays left: <b>{days_left}</b>"
         rows = []
         if cur_plan != "whitelabel":
@@ -1268,30 +1258,27 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         cur_plan = seller_plan(uid)
 
         if cur_plan == "whitelabel" and plan == "a":
-            await update.callback_query.message.reply_text("❌ White‑Label cannot pay $5. Please choose Plan B.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("❌ White-Label cannot pay $5. Choose Plan B.")
             return
 
         price = PLAN_A_PRICE if plan == "a" else PLAN_B_PRICE
         bal = get_balance(SUPER_ADMIN_ID, uid)
         if bal < price:
-            await update.callback_query.message.reply_text("❌ Not enough Main Shop balance. Deposit first.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("❌ Not enough Main Shop balance. Deposit first.")
             return
 
-        # deduct master wallet
         set_balance(SUPER_ADMIN_ID, uid, bal - price)
 
         note_plan = ""
-        # Apply plan rules:
         if plan == "b":
             seller_set_plan(uid, "whitelabel")
-            note_plan = "White‑Label"
+            note_plan = "White-Label"
         else:
-            # Plan A ($5):
-            # - If currently branded and ACTIVE => upgrade to whitelabel
-            # - Else => set branded (first purchase)
+            # $5:
+            # - if branded and active => upgrade to whitelabel
             if cur_plan == "branded" and seller_active(uid):
                 seller_set_plan(uid, "whitelabel")
-                note_plan = "White‑Label (upgrade via $5)"
+                note_plan = "White-Label (upgrade via $5)"
             else:
                 seller_set_plan(uid, "branded")
                 note_plan = "Branded"
@@ -1303,22 +1290,19 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         await update.callback_query.message.reply_text(
             f"✅ Plan activated: <b>{esc(note_plan)}</b>\nNow send your <b>BotFather token</b>.",
             parse_mode=ParseMode.HTML,
-            reply_markup=back_menu_kb(bot_kind)
+            reply_markup=kb([[InlineKeyboardButton("❌ Cancel", callback_data="m:menu")]])
         )
 
     async def token_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state, data = get_state(context)
-        if state != "await_token":
-            return
-        if bot_kind != "master":
+        if state != "await_token" or bot_kind != "master":
             return
         uid = update.effective_user.id
         seller_id = int(data["seller_id"])
         if uid != seller_id:
             return
-        token = (update.message.text or "").strip()
 
-        # validate token
+        token = (update.message.text or "").strip()
         try:
             tmp = Application.builder().token(token).build()
             await tmp.initialize()
@@ -1333,7 +1317,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         ensure_shop_settings(seller_id)
         clear_state(context)
 
-        # start seller bot only if seller is active and not banned
         if seller_active(seller_id) and int(seller_row(seller_id)["banned_shop"] or 0) == 0:
             await MANAGER.start_seller_bot(seller_id, token)
 
@@ -1346,15 +1329,18 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return
         uid = update.effective_user.id
         if uid != shop_owner_id and not is_super(uid):
-            await update.callback_query.message.reply_text("❌ Only the seller owner can use this.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("❌ Only the seller owner can use this.")
             return
+
         days_left = seller_days_left(shop_owner_id)
         status = "✅ Active" if days_left > 0 else "❌ Ended"
         plan = seller_plan(shop_owner_id)
         txt = f"⏳ <b>Subscription</b>\nStatus: <b>{status}</b>\nDays left: <b>{days_left}</b>\nPlan: <b>{esc(plan)}</b>\n\nRenew in Main Shop."
+
         if not MASTER_BOT_USERNAME:
-            await update.callback_query.message.reply_text(txt + "\n\n⚠️ Set env MASTER_BOT_USERNAME to show the renew button.", parse_mode=ParseMode.HTML, reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text(txt + "\n\n⚠️ Set MASTER_BOT_USERNAME env to show renew link.", parse_mode=ParseMode.HTML)
             return
+
         url = f"https://t.me/{MASTER_BOT_USERNAME}?start=extend"
         await update.callback_query.message.reply_text(
             txt, parse_mode=ParseMode.HTML,
@@ -1384,31 +1370,29 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         ensure_seller(uid)
         cur_plan = seller_plan(uid)
         if cur_plan == "whitelabel" and plan == "a":
-            await update.callback_query.message.reply_text("❌ White‑Label cannot pay $5. Please choose Plan B.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("❌ White-Label cannot pay $5. Choose Plan B.")
             return
+
         price = PLAN_A_PRICE if plan == "a" else PLAN_B_PRICE
         bal = get_balance(SUPER_ADMIN_ID, uid)
         if bal < price:
-            await update.callback_query.message.reply_text("❌ Not enough Main Shop balance. Deposit first.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("❌ Not enough balance. Deposit first.")
             return
 
         set_balance(SUPER_ADMIN_ID, uid, bal - price)
 
-        # Extend logic:
-        # - Plan B => keep/set whitelabel
-        # - Plan A => if whitelabel -> blocked already; else upgrade to whitelabel (your rule for renewal $5 upgrade)
         if plan == "b":
             seller_set_plan(uid, "whitelabel")
-            note = "White‑Label"
+            note = "White-Label"
         else:
             seller_set_plan(uid, "whitelabel")
-            note = "White‑Label (upgrade via $5)"
+            note = "White-Label (upgrade via $5)"
 
         seller_add_days(uid, PLAN_DAYS)
         log_tx(SUPER_ADMIN_ID, uid, "plan", -price, note, 1)
-        await update.callback_query.message.reply_text(f"✅ Renewed.\nPlan: {note}\nDays left: {seller_days_left(uid)}", reply_markup=back_menu_kb(bot_kind))
 
-        # restart seller bot if connected and enabled and active
+        await update.callback_query.message.reply_text(f"✅ Renewed.\nPlan: {note}\nDays left: {seller_days_left(uid)}", reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]]))
+
         sb = get_seller_bot(uid)
         if sb and int(sb["enabled"] or 0) == 1 and seller_active(uid):
             try:
@@ -1417,30 +1401,29 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
                 pass
 
     # ---------- Admin Panel ----------
-    def admin_panel_kb(sid: int) -> InlineKeyboardMarkup:
-        return grid([
-            InlineKeyboardButton("👥 Users List", callback_data=f"a:users:{sid}"),
-            InlineKeyboardButton("📢 Broadcast", callback_data=f"a:bcast:{sid}"),
-            InlineKeyboardButton("🖼 Edit Welcome", callback_data=f"a:welcome:{sid}"),
-            InlineKeyboardButton("💳 Edit Wallet", callback_data=f"a:wallet:{sid}"),
-            InlineKeyboardButton("🧩 Manage Products", callback_data=f"a:manage:{sid}"),
-            InlineKeyboardButton("⬅️ Menu", callback_data="m:menu"),
-        ], 2)
-
     def can_use_admin(uid: int) -> bool:
         if bot_kind == "seller":
-            # seller owner or super admin
             r = seller_row(shop_owner_id)
             if r and int(r["banned_panel"] or 0) == 1 and not is_super(uid):
                 return False
             return uid == shop_owner_id or is_super(uid)
         return is_super(uid)
 
+    def admin_panel_kb(sid: int) -> InlineKeyboardMarkup:
+        return grid([
+            InlineKeyboardButton("👥 Users List", callback_data=f"a:users:{sid}"),
+            InlineKeyboardButton("📢 Broadcast", callback_data=f"a:bcast:{sid}"),
+            InlineKeyboardButton("🖼 Edit Welcome", callback_data=f"a:welcome:{sid}"),
+            InlineKeyboardButton("💳 Edit Wallet", callback_data=f"a:wallet:{sid}"),
+            InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}"),
+            InlineKeyboardButton("⬅️ Menu", callback_data="m:menu"),
+        ], 2)
+
     async def admin_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         uid = update.effective_user.id
         if not can_use_admin(uid):
-            await update.callback_query.message.reply_text("❌ Not allowed.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("❌ Not allowed.")
             return
         sid = current_shop_id()
         await update.callback_query.message.reply_text("🛠 <b>Admin Panel</b>", parse_mode=ParseMode.HTML, reply_markup=admin_panel_kb(sid))
@@ -1448,21 +1431,19 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
     # Users list + search
     async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
-        _, _, sid_s = update.callback_query.data.split(":")
-        sid = int(sid_s)
+        sid = int(update.callback_query.data.split(":")[2])
         conn = db(); cur = conn.cursor()
-        cur.execute("SELECT user_id FROM balances WHERE shop_owner_id=? ORDER BY rowid DESC LIMIT 60", (sid,))
+        cur.execute("SELECT user_id FROM balances WHERE shop_owner_id=? ORDER BY rowid DESC LIMIT 80", (sid,))
         ids = [int(r["user_id"]) for r in cur.fetchall()]
         conn.close()
         ids = [i for i in ids if i != sid]
-        rows = [[InlineKeyboardButton(user_display(i), callback_data=f"u:open:{sid}:{i}")] for i in ids[:30]]
+        rows = [[InlineKeyboardButton(user_display(i), callback_data=f"u:open:{sid}:{i}")] for i in ids[:40]]
         rows.append([InlineKeyboardButton("🔍 Search", callback_data=f"u:search:{sid}"), InlineKeyboardButton("⬅️ Admin", callback_data="m:admin")])
         await update.callback_query.message.reply_text("Select a user:", reply_markup=kb(rows))
 
     async def admin_user_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
-        _, _, sid_s = update.callback_query.data.split(":")
-        sid = int(sid_s)
+        sid = int(update.callback_query.data.split(":")[2])
         set_state(context, "user_search", {"shop_id": sid})
         await update.callback_query.message.reply_text("Type username to search (example: rekko):", reply_markup=admin_panel_kb(sid))
 
@@ -1478,7 +1459,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             SELECT u.user_id FROM users u
             JOIN balances b ON b.user_id=u.user_id AND b.shop_owner_id=?
             WHERE lower(u.username) LIKE ?
-            LIMIT 30
+            LIMIT 40
         """, (sid, f"%{q}%"))
         ids = [int(r["user_id"]) for r in cur.fetchall()]
         conn.close()
@@ -1546,30 +1527,28 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         await update.callback_query.answer()
         _, _, sid_s, target_s = update.callback_query.data.split(":")
         ban_user(int(sid_s), int(target_s), 1)
-        await update.callback_query.message.reply_text("✅ Banned.", reply_markup=back_menu_kb(bot_kind))
+        await update.callback_query.message.reply_text("✅ Banned.", reply_markup=kb([[InlineKeyboardButton("⬅️ Admin", callback_data="m:admin")]]))
 
     async def admin_user_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         _, _, sid_s, target_s = update.callback_query.data.split(":")
         ban_user(int(sid_s), int(target_s), 0)
-        await update.callback_query.message.reply_text("✅ Unbanned.", reply_markup=back_menu_kb(bot_kind))
+        await update.callback_query.message.reply_text("✅ Unbanned.", reply_markup=kb([[InlineKeyboardButton("⬅️ Admin", callback_data="m:admin")]]))
 
     async def admin_user_restrict(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         _, _, sid_s, target_s, days_s = update.callback_query.data.split(":")
         restrict_user(int(sid_s), int(target_s), int(days_s))
-        await update.callback_query.message.reply_text("✅ Restricted.", reply_markup=back_menu_kb(bot_kind))
+        await update.callback_query.message.reply_text("✅ Restricted.", reply_markup=kb([[InlineKeyboardButton("⬅️ Admin", callback_data="m:admin")]]))
 
     # Broadcast
     async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
-        _, _, sid_s = update.callback_query.data.split(":")
-        sid = int(sid_s)
+        sid = int(update.callback_query.data.split(":")[2])
         set_state(context, "broadcast", {"shop_id": sid, "file_id": "", "file_type": "", "text": ""})
         await update.callback_query.message.reply_text(
             "📢 Send broadcast now (TEXT, or PHOTO/VIDEO with caption). Then press DONE.",
-            reply_markup=kb([[InlineKeyboardButton("✅ DONE", callback_data="b:done")],
-                             [InlineKeyboardButton("❌ Cancel", callback_data="b:cancel")]])
+            reply_markup=kb([[InlineKeyboardButton("✅ DONE", callback_data="b:done"), InlineKeyboardButton("❌ Cancel", callback_data="b:cancel")]])
         )
 
     async def broadcast_collect(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1593,13 +1572,13 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
     async def broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         clear_state(context)
-        await update.callback_query.message.reply_text("✅ Broadcast cancelled.", reply_markup=back_menu_kb(bot_kind))
+        await update.callback_query.message.reply_text("✅ Broadcast cancelled.", reply_markup=kb([[InlineKeyboardButton("⬅️ Admin", callback_data="m:admin")]]))
 
     async def broadcast_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         state, data = get_state(context)
         if state != "broadcast":
-            await update.callback_query.message.reply_text("No broadcast prepared.", reply_markup=back_menu_kb(bot_kind))
+            await update.callback_query.message.reply_text("No broadcast prepared.")
             return
         sid = int(data["shop_id"])
         file_id = (data.get("file_id") or "").strip()
@@ -1630,34 +1609,30 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
     # Edit welcome / wallet
     async def edit_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
-        _, _, sid_s = update.callback_query.data.split(":")
-        sid = int(sid_s)
+        sid = int(update.callback_query.data.split(":")[2])
         set_state(context, "edit_welcome", {"shop_id": sid})
         await update.callback_query.message.reply_text("Send welcome TEXT, or PHOTO/VIDEO with caption.", reply_markup=admin_panel_kb(sid))
 
     async def edit_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
-        _, _, sid_s = update.callback_query.data.split(":")
-        sid = int(sid_s)
+        sid = int(update.callback_query.data.split(":")[2])
         set_state(context, "edit_wallet", {"shop_id": sid})
         await update.callback_query.message.reply_text("Send new wallet message text:", reply_markup=admin_panel_kb(sid))
 
+    # ---- Manage Catalog (FULL) ----
     async def manage_root(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
-        _, _, sid_s = update.callback_query.data.split(":")
-        sid = int(sid_s)
-        cats = list_categories(sid)
+        sid = int(update.callback_query.data.split(":")[2])
+        cats = cat_list(sid)
         rows = [[InlineKeyboardButton("➕ Add Category", callback_data=f"mg:addcat:{sid}")]]
-        for c in cats[:25]:
+        for c in cats[:30]:
             rows.append([InlineKeyboardButton(f"📁 {c['name']}", callback_data=f"mg:cat:{sid}:{c['id']}")])
         rows.append([InlineKeyboardButton("⬅️ Admin", callback_data="m:admin")])
-        await update.callback_query.message.reply_text("🧩 Manage Products:", reply_markup=kb(rows))
+        await update.callback_query.message.reply_text("🧩 Manage Catalog:", reply_markup=kb(rows))
 
-    # Manage flows (simple prompts)
     async def mg_addcat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
-        _, _, sid_s = update.callback_query.data.split(":")
-        sid = int(sid_s)
+        sid = int(update.callback_query.data.split(":")[2])
         set_state(context, "mg_addcat", {"shop_id": sid})
         await update.callback_query.message.reply_text("Send category name:", reply_markup=admin_panel_kb(sid))
 
@@ -1665,53 +1640,77 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         await update.callback_query.answer()
         _, _, sid_s, cat_s = update.callback_query.data.split(":")
         sid = int(sid_s); cat_id = int(cat_s)
-        subs = list_cocats(sid, cat_id)
+        c = cat_get(sid, cat_id)
+        if not c:
+            await update.callback_query.message.reply_text("Category not found.", reply_markup=admin_panel_kb(sid))
+            return
+        subs = cocat_list(sid, cat_id)
         rows = [
             [InlineKeyboardButton("➕ Add Sub-Category", callback_data=f"mg:addsub:{sid}:{cat_id}")],
             [InlineKeyboardButton("✏️ Edit Category", callback_data=f"mg:editcat:{sid}:{cat_id}")],
             [InlineKeyboardButton("🗑 Delete Category", callback_data=f"mg:delcat:{sid}:{cat_id}")],
         ]
-        for sc in subs[:25]:
+        for sc in subs[:30]:
             rows.append([InlineKeyboardButton(f"📂 {sc['name']}", callback_data=f"mg:sub:{sid}:{cat_id}:{sc['id']}")])
         rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"a:manage:{sid}")])
-        await update.callback_query.message.reply_text("Category menu:", reply_markup=kb(rows))
+        await update.callback_query.message.reply_text(f"📁 <b>{esc(c['name'])}</b>", parse_mode=ParseMode.HTML, reply_markup=kb(rows))
+
+    async def mg_addsub(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
+        _, _, sid_s, cat_s = update.callback_query.data.split(":")
+        sid = int(sid_s); cat_id = int(cat_s)
+        set_state(context, "mg_addsub", {"shop_id": sid, "cat_id": cat_id})
+        await update.callback_query.message.reply_text("Send sub-category name:", reply_markup=admin_panel_kb(sid))
 
     async def mg_sub_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         _, _, sid_s, cat_s, sub_s = update.callback_query.data.split(":")
         sid = int(sid_s); cat_id = int(cat_s); sub_id = int(sub_s)
-        prods = list_products(sid, cat_id, sub_id)
+        sc = cocat_get(sid, sub_id)
+        if not sc:
+            await update.callback_query.message.reply_text("Sub-category not found.", reply_markup=admin_panel_kb(sid))
+            return
+        prods = prod_list(sid, cat_id, sub_id)
         rows = [
             [InlineKeyboardButton("➕ Add Product", callback_data=f"mg:addprod:{sid}:{cat_id}:{sub_id}")],
-            [InlineKeyboardButton("✏️ Edit Sub-Category", callback_data=f"mg:editsub:{sid}:{sub_id}")],
+            [InlineKeyboardButton("✏️ Edit Sub-Category", callback_data=f"mg:editsub:{sid}:{sub_id}:{cat_id}")],
             [InlineKeyboardButton("🗑 Delete Sub-Category", callback_data=f"mg:delsub:{sid}:{sub_id}:{cat_id}")],
         ]
-        for p in prods[:25]:
+        for p in prods[:30]:
             rows.append([InlineKeyboardButton(f"🛒 {p['name']}", callback_data=f"mg:prod:{sid}:{p['id']}")])
         rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"mg:cat:{sid}:{cat_id}")])
-        await update.callback_query.message.reply_text("Sub-Category menu:", reply_markup=kb(rows))
+        await update.callback_query.message.reply_text(f"📂 <b>{esc(sc['name'])}</b>", parse_mode=ParseMode.HTML, reply_markup=kb(rows))
+
+    async def mg_addprod(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
+        _, _, sid_s, cat_s, sub_s = update.callback_query.data.split(":")
+        sid = int(sid_s); cat_id = int(cat_s); sub_id = int(sub_s)
+        set_state(context, "mg_addprod_name", {"shop_id": sid, "cat_id": cat_id, "sub_id": sub_id})
+        await update.callback_query.message.reply_text("Send product name:", reply_markup=admin_panel_kb(sid))
 
     async def mg_prod_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         _, _, sid_s, pid_s = update.callback_query.data.split(":")
         sid = int(sid_s); pid = int(pid_s)
-        p = get_product(sid, pid)
+        p = prod_get(sid, pid)
         if not p:
-            await update.callback_query.message.reply_text("Product not found.")
+            await update.callback_query.message.reply_text("Product not found.", reply_markup=admin_panel_kb(sid))
             return
         st = stock_count(sid, pid)
         rows = [
-            [InlineKeyboardButton("✏️ Edit Name/Price", callback_data=f"mg:editprod:{sid}:{pid}")],
+            [InlineKeyboardButton("✏️ Edit Name", callback_data=f"mg:editname:{sid}:{pid}"),
+             InlineKeyboardButton("💲 Edit Price", callback_data=f"mg:editprice:{sid}:{pid}")],
             [InlineKeyboardButton("📝 Edit Description", callback_data=f"mg:desc:{sid}:{pid}")],
             [InlineKeyboardButton("🖼 Set Media", callback_data=f"mg:media:{sid}:{pid}")],
             [InlineKeyboardButton("🔗 Set Private Link", callback_data=f"mg:link:{sid}:{pid}")],
             [InlineKeyboardButton(f"🔑 Add Keys (stock {st})", callback_data=f"mg:keys:{sid}:{pid}")],
+            [InlineKeyboardButton("🧹 Clear Keys", callback_data=f"mg:clearkeys:{sid}:{pid}")],
             [InlineKeyboardButton("🗑 Delete Product", callback_data=f"mg:delprod:{sid}:{pid}")],
             [InlineKeyboardButton("⬅️ Back", callback_data=f"mg:sub:{sid}:{p['category_id']}:{p['cocategory_id']}")],
         ]
-        await update.callback_query.message.reply_text("Product manager:", reply_markup=kb(rows))
+        await update.callback_query.message.reply_text(f"🛒 <b>{esc(p['name'])}</b>\nStock: <b>{st}</b>", parse_mode=ParseMode.HTML, reply_markup=kb(rows))
 
-    # ---------- SUPER ADMIN BUTTON ----------
+    # Super Admin area
     async def super_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         if not is_super(update.effective_user.id):
@@ -1725,9 +1724,9 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
 
     async def super_sellers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
-        sellers = list_sellers()
+        sellers = list_sellers_only()
         rows = [[InlineKeyboardButton(user_display(int(s["seller_id"])), callback_data=f"sa:sel:{int(s['seller_id'])}")]
-                for s in sellers[:40]]
+                for s in sellers[:50]]
         rows.append([InlineKeyboardButton("🔍 Search", callback_data="sa:search"), InlineKeyboardButton("⬅️ Back", callback_data="m:super")])
         await update.callback_query.message.reply_text("Sellers:", reply_markup=kb(rows))
 
@@ -1742,8 +1741,8 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return
         q = (update.message.text or "").strip().lstrip("@").lower()
         clear_state(context)
-        sellers = list_sellers()
-        matched = []
+        sellers = list_sellers_only()
+        matched: List[int] = []
         for s in sellers:
             sid = int(s["seller_id"])
             u = user_row(sid)
@@ -1752,7 +1751,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         if not matched:
             await update.message.reply_text("No matches.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data="m:super")]]))
             return
-        rows = [[InlineKeyboardButton(user_display(sid), callback_data=f"sa:sel:{sid}")] for sid in matched[:40]]
+        rows = [[InlineKeyboardButton(user_display(sid), callback_data=f"sa:sel:{sid}")] for sid in matched[:50]]
         rows.append([InlineKeyboardButton("⬅️ Back", callback_data="m:super")])
         await update.message.reply_text("Matches:", reply_markup=kb(rows))
 
@@ -1784,7 +1783,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         sid = int(parts[2])
         if act == "ban":
             super_set_seller_flag(sid, "banned_shop", 1)
-            # stop bot
             try:
                 disable_seller_bot(sid)
                 await MANAGER.stop_seller_bot(sid)
@@ -1793,7 +1791,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             await update.callback_query.message.reply_text("✅ Seller shop banned.")
         elif act == "unban":
             super_set_seller_flag(sid, "banned_shop", 0)
-            # restart if active and connected
             sb = get_seller_bot(sid)
             if sb and seller_active(sid) and int(sb["enabled"] or 0) == 1:
                 try:
@@ -1821,75 +1818,45 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             await update.callback_query.message.reply_text("Send amount (+add or -deduct), example: +10 or -5")
         elif act == "warn":
             try:
-                await context.bot.send_message(chat_id=sid, text="⏳ Your subscription is ending soon. Please renew in Main Shop.")
+                await context.bot.send_message(sid, "⏳ Your subscription is ending soon. Please renew in Main Shop.")
             except Exception:
                 pass
             await update.callback_query.message.reply_text("✅ Warning sent.")
 
-    async def super_edit_balance_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        state, data = get_state(context)
-        if state != "super_edit_balance":
-            return
-        sid = int(data["seller_id"])
-        t = (update.message.text or "").strip().replace(" ", "")
-        clear_state(context)
-        m = re.fullmatch(r"([+-])(\d+(?:\.\d+)?)", t)
-        if not m:
-            await update.message.reply_text("❌ Invalid. Example: +10 or -5")
-            return
-        sign = m.group(1)
-        amt = float(m.group(2))
-        # seller balance means seller's balance in MASTER shop wallet (shop_owner_id=SUPER_ADMIN_ID)
-        if sign == "+":
-            add_balance(SUPER_ADMIN_ID, sid, amt)
-            log_tx(SUPER_ADMIN_ID, sid, "balance_edit", amt, "Super admin")
-        else:
-            add_balance(SUPER_ADMIN_ID, sid, -amt)
-            log_tx(SUPER_ADMIN_ID, sid, "balance_edit", -amt, "Super admin")
-        await update.message.reply_text(f"✅ Updated seller balance. New: {money(get_balance(SUPER_ADMIN_ID, sid))} {CURRENCY}")
-
-    # ---------- message handler for states (deposit/support/admin edits/broadcast/manage) ----------
+    # ---------- TEXT/MEDIA INPUT (all flows) ----------
     async def text_or_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         upsert_user(update.effective_user)
         state, data = get_state(context)
 
         # deposit
         if state == "deposit_amount":
-            await deposit_amount_msg(update, context)
-            return
+            await deposit_amount_msg(update, context); return
         if state == "deposit_proof":
-            await deposit_proof_msg(update, context)
-            return
+            await deposit_proof_msg(update, context); return
 
         # support draft
         if state == "support_draft":
-            await support_collect(update, context)
-            return
+            await support_collect(update, context); return
 
         # admin reply
         if state == "admin_reply":
-            await admin_reply_text(update, context)
-            return
+            await admin_reply_text(update, context); return
 
         # token
         if state == "await_token":
-            await token_text(update, context)
-            return
+            await token_text(update, context); return
 
-        # admin user search
+        # admin search
         if state == "user_search":
-            await admin_user_search_text(update, context)
-            return
+            await admin_user_search_text(update, context); return
 
-        # admin edit balance
+        # edit balance
         if state == "edit_balance":
-            await admin_user_edit_balance_text(update, context)
-            return
+            await admin_user_edit_balance_text(update, context); return
 
         # broadcast
         if state == "broadcast":
-            await broadcast_collect(update, context)
-            return
+            await broadcast_collect(update, context); return
 
         # edit welcome
         if state == "edit_welcome":
@@ -1921,20 +1888,29 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
 
         # super admin seller balance
         if state == "super_edit_balance":
-            await super_edit_balance_text(update, context)
+            sid = int(data["seller_id"])
+            t = (update.message.text or "").strip().replace(" ", "")
+            clear_state(context)
+            m = re.fullmatch(r"([+-])(\d+(?:\.\d+)?)", t)
+            if not m:
+                await update.message.reply_text("❌ Invalid. Example: +10 or -5"); return
+            sign = m.group(1); amt = float(m.group(2))
+            if sign == "+":
+                add_balance(SUPER_ADMIN_ID, sid, amt); log_tx(SUPER_ADMIN_ID, sid, "balance_edit", amt, "Super admin")
+            else:
+                add_balance(SUPER_ADMIN_ID, sid, -amt); log_tx(SUPER_ADMIN_ID, sid, "balance_edit", -amt, "Super admin")
+            await update.message.reply_text(f"✅ Updated seller balance. New: {money(get_balance(SUPER_ADMIN_ID, sid))} {CURRENCY}")
             return
 
-        # super admin search
+        # super search
         if state == "super_search":
-            await super_search_text(update, context)
-            return
+            await super_search_text(update, context); return
 
-        # manage prompts (minimal but functional)
+        # ---- Manage Catalog states ----
         if state == "mg_addcat":
             sid = int(data["shop_id"])
             name = (update.message.text or "").strip()
-            if not name:
-                return
+            if not name: return
             conn = db(); cur = conn.cursor()
             cur.execute("INSERT INTO categories(shop_owner_id,name) VALUES(?,?)", (sid, name))
             conn.commit(); conn.close()
@@ -1942,19 +1918,123 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             await update.message.reply_text("✅ Category added.", reply_markup=admin_panel_kb(sid))
             return
 
-        # fallback
-        await update.message.reply_text("Use the buttons in the menu. Type /start to reopen.")
+        if state == "mg_addsub":
+            sid = int(data["shop_id"]); cat_id = int(data["cat_id"])
+            name = (update.message.text or "").strip()
+            if not name: return
+            conn = db(); cur = conn.cursor()
+            cur.execute("INSERT INTO cocategories(shop_owner_id,category_id,name) VALUES(?,?,?)", (sid, cat_id, name))
+            conn.commit(); conn.close()
+            clear_state(context)
+            await update.message.reply_text("✅ Sub-category added.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:cat:{sid}:{cat_id}")]]))
+            return
 
-    # ---------- main callback router ----------
+        if state == "mg_addprod_name":
+            sid = int(data["shop_id"]); cat_id = int(data["cat_id"]); sub_id = int(data["sub_id"])
+            name = (update.message.text or "").strip()
+            if not name: return
+            data["name"] = name
+            set_state(context, "mg_addprod_price", data)
+            await update.message.reply_text("Send product price (number):")
+            return
+
+        if state == "mg_addprod_price":
+            sid = int(data["shop_id"]); cat_id = int(data["cat_id"]); sub_id = int(data["sub_id"])
+            price = parse_float(update.message.text or "")
+            if price is None or price <= 0:
+                await update.message.reply_text("❌ Invalid price. Send number."); return
+            name = data["name"]
+            conn = db(); cur = conn.cursor()
+            cur.execute("""INSERT INTO products(shop_owner_id,category_id,cocategory_id,name,price) VALUES(?,?,?,?,?)""",
+                        (sid, cat_id, sub_id, name, float(price)))
+            pid = int(cur.lastrowid)
+            conn.commit(); conn.close()
+            clear_state(context)
+            await update.message.reply_text("✅ Product added.", reply_markup=kb([[InlineKeyboardButton("Open Product", callback_data=f"mg:prod:{sid}:{pid}")]]))
+            return
+
+        if state == "mg_edit_name":
+            sid = int(data["shop_id"]); pid = int(data["pid"])
+            name = (update.message.text or "").strip()
+            if not name: return
+            conn = db(); cur = conn.cursor()
+            cur.execute("UPDATE products SET name=? WHERE shop_owner_id=? AND id=?", (name, sid, pid))
+            conn.commit(); conn.close()
+            clear_state(context)
+            await update.message.reply_text("✅ Updated.", reply_markup=kb([[InlineKeyboardButton("Back", callback_data=f"mg:prod:{sid}:{pid}")]]))
+            return
+
+        if state == "mg_edit_price":
+            sid = int(data["shop_id"]); pid = int(data["pid"])
+            price = parse_float(update.message.text or "")
+            if price is None or price <= 0:
+                await update.message.reply_text("❌ Invalid price."); return
+            conn = db(); cur = conn.cursor()
+            cur.execute("UPDATE products SET price=? WHERE shop_owner_id=? AND id=?", (float(price), sid, pid))
+            conn.commit(); conn.close()
+            clear_state(context)
+            await update.message.reply_text("✅ Updated.", reply_markup=kb([[InlineKeyboardButton("Back", callback_data=f"mg:prod:{sid}:{pid}")]]))
+            return
+
+        if state == "mg_edit_desc":
+            sid = int(data["shop_id"]); pid = int(data["pid"])
+            desc = (update.message.text or "").strip()
+            conn = db(); cur = conn.cursor()
+            cur.execute("UPDATE products SET description=? WHERE shop_owner_id=? AND id=?", (desc, sid, pid))
+            conn.commit(); conn.close()
+            clear_state(context)
+            await update.message.reply_text("✅ Description updated.", reply_markup=kb([[InlineKeyboardButton("Back", callback_data=f"mg:prod:{sid}:{pid}")]]))
+            return
+
+        if state == "mg_edit_link":
+            sid = int(data["shop_id"]); pid = int(data["pid"])
+            link = (update.message.text or "").strip()
+            conn = db(); cur = conn.cursor()
+            cur.execute("UPDATE products SET tg_link=? WHERE shop_owner_id=? AND id=?", (link, sid, pid))
+            conn.commit(); conn.close()
+            clear_state(context)
+            await update.message.reply_text("✅ Link updated.", reply_markup=kb([[InlineKeyboardButton("Back", callback_data=f"mg:prod:{sid}:{pid}")]]))
+            return
+
+        if state == "mg_edit_media":
+            sid = int(data["shop_id"]); pid = int(data["pid"])
+            msg = update.message
+            file_id = ""; ftype = ""
+            if msg.photo:
+                file_id = msg.photo[-1].file_id; ftype = "photo"
+            elif msg.video:
+                file_id = msg.video.file_id; ftype = "video"
+            else:
+                await update.message.reply_text("Send a PHOTO or VIDEO."); return
+            conn = db(); cur = conn.cursor()
+            cur.execute("UPDATE products SET file_id=?, file_type=? WHERE shop_owner_id=? AND id=?", (file_id, ftype, sid, pid))
+            conn.commit(); conn.close()
+            clear_state(context)
+            await update.message.reply_text("✅ Media set.", reply_markup=kb([[InlineKeyboardButton("Back", callback_data=f"mg:prod:{sid}:{pid}")]]))
+            return
+
+        if state == "mg_add_keys":
+            sid = int(data["shop_id"]); pid = int(data["pid"])
+            raw = (update.message.text or "").strip()
+            lines = raw.splitlines()
+            n = add_keys(sid, pid, lines)
+            clear_state(context)
+            await update.message.reply_text(f"✅ Added {n} key(s). Stock now: {stock_count(sid, pid)}", reply_markup=kb([[InlineKeyboardButton("Back", callback_data=f"mg:prod:{sid}:{pid}")]]))
+            return
+
+        await update.message.reply_text("Use the buttons. Type /start to reopen menu.")
+
+    # ---------- CALLBACK ROUTER ----------
     async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         q = update.callback_query
         data = q.data
         uid = update.effective_user.id
 
-        # general menu
+        # menu
         if data == "m:menu":
             await menu_cb(update, context); return
 
+        # main buttons
         if data == "m:products":
             await products_root(update, context); return
         if data.startswith("p:cat:"):
@@ -1974,7 +2054,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             await wallet(update, context); return
         if data == "w:deposit":
             await deposit_start(update, context); return
-
         if data.startswith("d:"):
             await deposit_decision(update, context); return
 
@@ -1989,7 +2068,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         if data.startswith("a:reply:"):
             await admin_reply_start(update, context); return
 
-        # connect / plan
+        # connect
         if data == "m:connect":
             await connect_screen(update, context); return
         if data.startswith("c:plan:"):
@@ -2004,7 +2083,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         # admin panel
         if data == "m:admin":
             await admin_open(update, context); return
-
         if data.startswith("a:users:"):
             await admin_users(update, context); return
         if data.startswith("u:search:"):
@@ -2036,15 +2114,103 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         if data.startswith("a:manage:"):
             await manage_root(update, context); return
 
-        # manage minimal routes
+        # manage callbacks
         if data.startswith("mg:addcat:"):
             await mg_addcat(update, context); return
         if data.startswith("mg:cat:"):
             await mg_cat_open(update, context); return
+        if data.startswith("mg:addsub:"):
+            await mg_addsub(update, context); return
         if data.startswith("mg:sub:"):
             await mg_sub_open(update, context); return
+        if data.startswith("mg:addprod:"):
+            await mg_addprod(update, context); return
         if data.startswith("mg:prod:"):
             await mg_prod_open(update, context); return
+
+        # product edit actions
+        if data.startswith("mg:editname:"):
+            await q.answer()
+            _, _, sid_s, pid_s = data.split(":")
+            set_state(context, "mg_edit_name", {"shop_id": int(sid_s), "pid": int(pid_s)})
+            await q.message.reply_text("Send new product name:"); return
+        if data.startswith("mg:editprice:"):
+            await q.answer()
+            _, _, sid_s, pid_s = data.split(":")
+            set_state(context, "mg_edit_price", {"shop_id": int(sid_s), "pid": int(pid_s)})
+            await q.message.reply_text("Send new product price (number):"); return
+        if data.startswith("mg:desc:"):
+            await q.answer()
+            _, _, sid_s, pid_s = data.split(":")
+            set_state(context, "mg_edit_desc", {"shop_id": int(sid_s), "pid": int(pid_s)})
+            await q.message.reply_text("Send description (or '-' to clear):"); return
+        if data.startswith("mg:link:"):
+            await q.answer()
+            _, _, sid_s, pid_s = data.split(":")
+            set_state(context, "mg_edit_link", {"shop_id": int(sid_s), "pid": int(pid_s)})
+            await q.message.reply_text("Send private Telegram link (or '-' to clear):"); return
+        if data.startswith("mg:media:"):
+            await q.answer()
+            _, _, sid_s, pid_s = data.split(":")
+            set_state(context, "mg_edit_media", {"shop_id": int(sid_s), "pid": int(pid_s)})
+            await q.message.reply_text("Send PHOTO or VIDEO to set as product media:"); return
+        if data.startswith("mg:keys:"):
+            await q.answer()
+            _, _, sid_s, pid_s = data.split(":")
+            set_state(context, "mg_add_keys", {"shop_id": int(sid_s), "pid": int(pid_s)})
+            await q.message.reply_text("Send keys (1 per line). Each line = 1 stock:"); return
+        if data.startswith("mg:clearkeys:"):
+            await q.answer()
+            _, _, sid_s, pid_s = data.split(":")
+            sid = int(sid_s); pid = int(pid_s)
+            clear_keys(sid, pid)
+            await q.message.reply_text("✅ Cleared all unused keys.", reply_markup=kb([[InlineKeyboardButton("Back", callback_data=f"mg:prod:{sid}:{pid}")]])); return
+        if data.startswith("mg:delprod:"):
+            await q.answer()
+            _, _, sid_s, pid_s = data.split(":")
+            sid = int(sid_s); pid = int(pid_s)
+            p = prod_get(sid, pid)
+            if not p:
+                await q.message.reply_text("Not found."); return
+            conn = db(); cur = conn.cursor()
+            cur.execute("DELETE FROM products WHERE shop_owner_id=? AND id=?", (sid, pid))
+            cur.execute("DELETE FROM product_keys WHERE shop_owner_id=? AND product_id=?", (sid, pid))
+            conn.commit(); conn.close()
+            await q.message.reply_text("✅ Product deleted.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:sub:{sid}:{p['category_id']}:{p['cocategory_id']}")]])); return
+
+        # category edit/delete
+        if data.startswith("mg:editcat:"):
+            await q.answer()
+            _, _, sid_s, cat_s = data.split(":")
+            set_state(context, "mg_edit_cat_name", {"shop_id": int(sid_s), "cat_id": int(cat_s)})
+            await q.message.reply_text("Send new category name:"); return
+        if data.startswith("mg:delcat:"):
+            await q.answer()
+            _, _, sid_s, cat_s = data.split(":")
+            sid = int(sid_s); cat_id = int(cat_s)
+            # delete cascade
+            conn = db(); cur = conn.cursor()
+            cur.execute("DELETE FROM categories WHERE shop_owner_id=? AND id=?", (sid, cat_id))
+            cur.execute("DELETE FROM cocategories WHERE shop_owner_id=? AND category_id=?", (sid, cat_id))
+            cur.execute("DELETE FROM products WHERE shop_owner_id=? AND category_id=?", (sid, cat_id))
+            conn.commit(); conn.close()
+            await q.message.reply_text("✅ Category deleted.", reply_markup=admin_panel_kb(sid)); return
+
+        # subcat edit/delete
+        if data.startswith("mg:editsub:"):
+            await q.answer()
+            _, _, sid_s, sub_s, cat_s = data.split(":")
+            set_state(context, "mg_edit_sub_name", {"shop_id": int(sid_s), "sub_id": int(sub_s), "cat_id": int(cat_s)})
+            await q.message.reply_text("Send new sub-category name:"); return
+        if data.startswith("mg:delsub:"):
+            await q.answer()
+            _, _, sid_s, sub_s, cat_s = data.split(":")
+            sid = int(sid_s); sub_id = int(sub_s); cat_id = int(cat_s)
+            conn = db(); cur = conn.cursor()
+            cur.execute("DELETE FROM cocategories WHERE shop_owner_id=? AND id=?", (sid, sub_id))
+            cur.execute("DELETE FROM products WHERE shop_owner_id=? AND cocategory_id=?", (sid, sub_id))
+            conn.commit(); conn.close()
+            await q.message.reply_text("✅ Sub-category deleted.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:cat:{sid}:{cat_id}")]])); return
 
         # super admin
         if data == "m:super":
@@ -2060,15 +2226,48 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
 
         await q.answer()
 
-    # register
+    # extra: handle edit cat/sub name states in text_or_media via simple hooks
+    async def extra_text_states(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        state, data = get_state(context)
+        if state == "mg_edit_cat_name":
+            sid = int(data["shop_id"]); cat_id = int(data["cat_id"])
+            name = (update.message.text or "").strip()
+            if not name: return
+            conn = db(); cur = conn.cursor()
+            cur.execute("UPDATE categories SET name=? WHERE shop_owner_id=? AND id=?", (name, sid, cat_id))
+            conn.commit(); conn.close()
+            clear_state(context)
+            await update.message.reply_text("✅ Category updated.", reply_markup=kb([[InlineKeyboardButton("Back", callback_data=f"mg:cat:{sid}:{cat_id}")]]))
+            return True
+        if state == "mg_edit_sub_name":
+            sid = int(data["shop_id"]); sub_id = int(data["sub_id"]); cat_id = int(data["cat_id"])
+            name = (update.message.text or "").strip()
+            if not name: return
+            conn = db(); cur = conn.cursor()
+            cur.execute("UPDATE cocategories SET name=? WHERE shop_owner_id=? AND id=?", (name, sid, sub_id))
+            conn.commit(); conn.close()
+            clear_state(context)
+            await update.message.reply_text("✅ Sub-category updated.", reply_markup=kb([[InlineKeyboardButton("Back", callback_data=f"mg:cat:{sid}:{cat_id}")]]))
+            return True
+        return False
+
+    # wrap main message handler to include extra_text_states
+    async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.message and update.message.text:
+            handled = await extra_text_states(update, context)
+            if handled:
+                return
+        await text_or_media(update, context)
+
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CallbackQueryHandler(callbacks))
-    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO, text_or_media))
+    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO, message_router))
 
 # ---------------- MAIN ----------------
 async def main():
     init_db()
-    # start seller bots that are enabled and active
+
+    # start seller bots
     for r in list_enabled_seller_bots():
         sid = int(r["seller_id"])
         if seller_active(sid) and int(seller_row(sid)["banned_shop"] or 0) == 0:
@@ -2077,7 +2276,6 @@ async def main():
             except Exception:
                 log.exception("Failed to start seller bot %s", sid)
 
-    # start master app
     master = Application.builder().token(BOT_TOKEN).build()
     register_handlers(master, shop_owner_id=SUPER_ADMIN_ID, bot_kind="master")
 
@@ -2087,7 +2285,6 @@ async def main():
     asyncio.create_task(watchdog())
     log.info("Master bot started.")
 
-    # keep alive forever
     while True:
         await asyncio.sleep(3600)
 
