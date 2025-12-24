@@ -2768,8 +2768,6 @@ out_path.write_text(main, encoding="utf-8")
 str(out_path)
 
 
-✅ Done — I’ll resend **FULL `main.py` in 3 parts** right now (so your connection won’t break it).
-
 ### How to use
 1) Create a file named **main.py**  
 2) Paste **Part 1**, then **Part 2**, then **Part 3** (in order)  
