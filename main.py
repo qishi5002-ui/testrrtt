@@ -63,7 +63,7 @@ PLAN_B_PRICE = float((os.getenv("PLAN_B_PRICE") or "10").strip() or "10")   # $1
 PLAN_DAYS = int((os.getenv("PLAN_DAYS") or "30").strip() or "30")
 MASTER_BOT_USERNAME = (os.getenv("MASTER_BOT_USERNAME") or "").strip().lstrip("@")
 
-BRAND_LINE = "Bot made by @RekkoOwn"
+BRAND_LINE = "Bot made by @RekkoOwn\nGroup : @AutoPanels"
 
 if not BOT_TOKEN:
     raise RuntimeError("Missing BOT_TOKEN")
@@ -191,6 +191,14 @@ def init_db():
         connect_desc TEXT DEFAULT ''
     )""")
 
+    
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS payment_methods(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        shop_owner_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        instructions TEXT NOT NULL
+    )""")
     cur.execute("""
     CREATE TABLE IF NOT EXISTS balances(
         shop_owner_id INTEGER NOT NULL,
@@ -354,6 +362,49 @@ def set_shop_setting(shop_owner_id: int, field: str, value: str):
     conn = db(); cur = conn.cursor()
     cur.execute(f"UPDATE shop_settings SET {field}=? WHERE shop_owner_id=?", (value or "", shop_owner_id))
     conn.commit(); conn.close()
+
+# --- payment methods (extra deposit methods) ---
+def pm_list(shop_owner_id: int) -> List[sqlite3.Row]:
+    conn = db(); cur = conn.cursor()
+    cur.execute("SELECT * FROM payment_methods WHERE shop_owner_id=? ORDER BY id DESC", (shop_owner_id,))
+    rows = cur.fetchall(); conn.close()
+    return rows
+
+def pm_add(shop_owner_id: int, name: str, instructions: str) -> int:
+    conn = db(); cur = conn.cursor()
+    cur.execute("INSERT INTO payment_methods(shop_owner_id,name,instructions) VALUES(?,?,?)",
+                (shop_owner_id, (name or '').strip()[:40], (instructions or '').strip()[:3500]))
+    rid = int(cur.lastrowid)
+    conn.commit(); conn.close()
+    return rid
+
+def pm_update(pm_id: int, name: str, instructions: str):
+    conn = db(); cur = conn.cursor()
+    cur.execute("UPDATE payment_methods SET name=?, instructions=? WHERE id=?",
+                ((name or '').strip()[:40], (instructions or '').strip()[:3500], int(pm_id)))
+    conn.commit(); conn.close()
+
+def pm_delete(pm_id: int):
+    conn = db(); cur = conn.cursor()
+    cur.execute("DELETE FROM payment_methods WHERE id=?", (int(pm_id),))
+    conn.commit(); conn.close()
+
+def pm_get(pm_id: int) -> Optional[sqlite3.Row]:
+    conn = db(); cur = conn.cursor()
+    cur.execute("SELECT * FROM payment_methods WHERE id=?", (int(pm_id),))
+    r = cur.fetchone(); conn.close()
+    return r
+
+def build_deposit_methods(shop_owner_id: int) -> List[Dict[str, str]]:
+    s = get_shop_settings(shop_owner_id)
+    methods: List[Dict[str, str]] = []
+    default_txt = (s["wallet_message"] or "").strip()
+    if default_txt:
+        methods.append({"id": "0", "name": "TRC-20", "text": default_txt})
+    for r in pm_list(shop_owner_id):
+        methods.append({"id": str(int(r["id"])), "name": (r["name"] or "Method"), "text": (r["instructions"] or "")})
+    return methods
+
 
 # --- users ---
 def upsert_user(u):
@@ -1160,7 +1211,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         if amt is None or amt <= 0:
             await update.message.reply_text("❌ Invalid amount. Send a number (example: 10).")
             return
-        set_state(context, "deposit_proof", {"shop_id": int(data["shop_id"]), "amount": float(amt)})
+        set_state(context, "deposit_proof", {"shop_id": int(data["shop_id"]), "amount": float(amt), "method_name": data.get("method_name","")})
         await update.message.reply_text("Now send a PHOTO proof of payment.")
 
     async def deposit_proof_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1173,6 +1224,8 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         sid = int(data["shop_id"])
         uid = update.effective_user.id
         amt = float(data["amount"])
+        method_name = (data.get("method_name") or "").strip()
+        method_disp = method_name if method_name else "TRC-20"
         file_id = update.message.photo[-1].file_id
 
         conn = db(); cur = conn.cursor()
@@ -1191,7 +1244,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             m = await context.bot.send_photo(
                 chat_id=owner_chat,
                 photo=file_id,
-                caption=f"💳 <b>Deposit Request</b>\n\nUser: {esc(user_display(uid))}\nAmount: <b>{money(amt)} {esc(CURRENCY)}</b>",
+                caption=f"💳 <b>Deposit Request</b>\n\nUser: {esc(user_display(uid))}\nMethod: <b>{esc(method_disp)}</b>\nAmount: <b>{money(amt)} {esc(CURRENCY)}</b>",
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb([[
                     InlineKeyboardButton("✅ Approve", callback_data=f"d:ok:{req_id}"),
@@ -1233,12 +1286,12 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
 
         if decision == "ok":
             add_balance(sid, user_id, amt)
-            log_tx(sid, user_id, "deposit", amt, "")
+            log_tx(sid, user_id, "deposit", amt, method_name)
             cur.execute("UPDATE deposit_requests SET status='approved', handled_by=?, handled_at=? WHERE id=?",
                         (me, ts(), rid))
             conn.commit(); conn.close()
             try:
-                await context.bot.send_message(user_id, f"✅ Deposited: {money(amt)} {CURRENCY}\nTotal Balance: {money(get_balance(sid, user_id))} {CURRENCY}")
+                await context.bot.send_message(user_id, f"✅ Deposited ({method_disp}): {money(amt)} {CURRENCY}\nTotal Balance: {money(get_balance(sid, user_id))} {CURRENCY}")
             except Exception:
                 pass
         else:
@@ -1278,7 +1331,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
                 note = (r["note"] or "").strip()
                 qty = int(r["qty"] or 1)
                 if kind == "deposit":
-                    lines.append(f"✅ Deposited: <b>{money(amt)} {esc(CURRENCY)}</b>")
+                    lines.append(f"✅ Deposited{(f' ({esc(note)})' if note else '')}: <b>{money(amt)} {esc(CURRENCY)}</b>")
                 elif kind == "purchase":
                     order = ""
                     prodname = note
@@ -1835,8 +1888,74 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
     async def edit_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         sid = int(update.callback_query.data.split(":")[2])
+
+        methods = pm_list(sid)
+        s = get_shop_settings(sid)
+        default_txt = (s["wallet_message"] or "").strip()
+
+        rows = [
+            [InlineKeyboardButton("✏️ Edit TRC-20 Text", callback_data=f"pm:editdefault:{sid}")],
+            [InlineKeyboardButton("➕ Add Payment Method", callback_data=f"pm:add:{sid}")],
+        ]
+        for r in methods[:12]:
+            rows.append([InlineKeyboardButton(f"💳 {r['name']}", callback_data=f"pm:open:{sid}:{r['id']}")])
+        rows.append([InlineKeyboardButton("⬅️ Admin", callback_data="m:admin")])
+
+        await update.callback_query.message.reply_text(
+            "💳 <b>Wallet / Payment Methods</b>\n\n"
+            f"TRC-20 text is {'set' if default_txt else 'not set'}.\n"
+            "Add more methods like PAYPAL / BANK and set custom text.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb(rows)
+        )
+
+    async def pm_edit_default(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
+        sid = int(update.callback_query.data.split(":")[2])
         set_state(context, "edit_wallet", {"shop_id": sid})
-        await update.callback_query.message.reply_text("Send new wallet message text:", reply_markup=admin_panel_kb(sid))
+        await update.callback_query.message.reply_text("Send TRC-20 instructions text (or '-' to clear):", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"a:wallet:{sid}")]]))
+
+    async def pm_add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
+        sid = int(update.callback_query.data.split(":")[2])
+        set_state(context, "pm_add_name", {"shop_id": sid})
+        await update.callback_query.message.reply_text("Send new payment method name (example: PAYPAL):")
+
+    async def pm_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
+        _, _, sid_s, pmid_s = update.callback_query.data.split(":")
+        sid = int(sid_s); pmid = int(pmid_s)
+        r = pm_get(pmid)
+        if not r or int(r["shop_owner_id"]) != sid:
+            await update.callback_query.message.reply_text("Not found.")
+            return
+        await update.callback_query.message.reply_text(
+            f"💳 <b>{esc(r['name'])}</b>\n\n{esc(r['instructions'])}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([
+                [InlineKeyboardButton("✏️ Edit", callback_data=f"pm:edit:{sid}:{pmid}")],
+                [InlineKeyboardButton("🗑 Delete", callback_data=f"pm:del:{sid}:{pmid}")],
+                [InlineKeyboardButton("⬅️ Back", callback_data=f"a:wallet:{sid}")]
+            ])
+        )
+
+    async def pm_edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
+        _, _, sid_s, pmid_s = update.callback_query.data.split(":")
+        sid = int(sid_s); pmid = int(pmid_s)
+        set_state(context, "pm_edit", {"shop_id": sid, "pm_id": pmid})
+        await update.callback_query.message.reply_text("Send new instructions text (or '-' to clear):")
+
+    async def pm_delete_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
+        _, _, sid_s, pmid_s = update.callback_query.data.split(":")
+        sid = int(sid_s); pmid = int(pmid_s)
+        r = pm_get(pmid)
+        if r and int(r["shop_owner_id"]) == sid:
+            pm_delete(pmid)
+        await update.callback_query.message.reply_text("✅ Deleted.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"a:wallet:{sid}")]]))
+
+
 
     # ---- Manage Catalog (FULL) ----
     async def manage_root(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2100,10 +2219,46 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         # edit wallet
         if state == "edit_wallet":
             sid = int(data["shop_id"])
-            set_shop_setting(sid, "wallet_message", update.message.text or "")
+            txt = (update.message.text or "").strip()
+            if txt == "-":
+                txt = ""
+            set_shop_setting(sid, "wallet_message", txt)
             clear_state(context)
             await update.message.reply_text("✅ Wallet message updated.", reply_markup=admin_panel_kb(sid))
             return
+
+        # payment methods add/edit
+        if state == "pm_add_name":
+            sid = int(data["shop_id"])
+            name = (update.message.text or "").strip()
+            if not name:
+                await update.message.reply_text("Send a method name (example: PAYPAL)."); return
+            set_state(context, "pm_add_text", {"shop_id": sid, "name": name})
+            await update.message.reply_text("Send instructions text for this method:"); return
+
+        if state == "pm_add_text":
+            sid = int(data["shop_id"])
+            txt = (update.message.text or "").strip()
+            if txt == "-":
+                txt = ""
+            pm_add(sid, data.get("name","Method"), txt)
+            clear_state(context)
+            await update.message.reply_text("✅ Added payment method.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"a:wallet:{sid}")]]))
+            return
+
+        if state == "pm_edit":
+            sid = int(data["shop_id"])
+            pmid = int(data["pm_id"])
+            txt = (update.message.text or "").strip()
+            if txt == "-":
+                txt = ""
+            r = pm_get(pmid)
+            if r and int(r["shop_owner_id"]) == sid:
+                pm_update(pmid, r["name"], txt)
+            clear_state(context)
+            await update.message.reply_text("✅ Updated.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"a:wallet:{sid}")]]))
+            return
+
 
         # super admin seller balance
         if state == "super_edit_balance":
@@ -2275,6 +2430,8 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             await wallet(update, context); return
         if data == "w:deposit":
             await deposit_start(update, context); return
+        if data.startswith("w:method:"):
+            await deposit_method(update, context); return
         if data.startswith("d:"):
             await deposit_decision(update, context); return
 
@@ -2336,6 +2493,17 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             await edit_welcome(update, context); return
         if data.startswith("a:wallet:"):
             await edit_wallet(update, context); return
+        if data.startswith("pm:editdefault:"):
+            await pm_edit_default(update, context); return
+        if data.startswith("pm:add:"):
+            await pm_add_start(update, context); return
+        if data.startswith("pm:open:"):
+            await pm_open(update, context); return
+        if data.startswith("pm:edit:"):
+            await pm_edit_start(update, context); return
+        if data.startswith("pm:del:"):
+            await pm_delete_cb(update, context); return
+
         if data.startswith("a:manage:"):
             await manage_root(update, context); return
 
