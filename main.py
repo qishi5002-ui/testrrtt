@@ -63,7 +63,7 @@ PLAN_B_PRICE = float((os.getenv("PLAN_B_PRICE") or "10").strip() or "10")   # $1
 PLAN_DAYS = int((os.getenv("PLAN_DAYS") or "30").strip() or "30")
 MASTER_BOT_USERNAME = (os.getenv("MASTER_BOT_USERNAME") or "").strip().lstrip("@")
 
-BRAND_LINE = "Bot made by @RekkoOwn\nGroup : @AutoPanels"
+BRAND_LINE = "Bot created by @RekkoOwn\nGroup : @AutoPanels"
 
 if not BOT_TOKEN:
     raise RuntimeError("Missing BOT_TOKEN")
@@ -1070,6 +1070,23 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         keys = pop_keys(sid, pid, uid, qty)
         order_id = create_order(sid, uid, pid, p["name"], qty, total, keys)
         log_tx(sid, uid, "purchase", -total, f'{p["name"]} | {order_id}', qty)
+        # --- Order + History safety ---
+        # If anything fails here, we still deliver keys to the user and keep the bot running.
+        order_id = ""
+        try:
+            order_id = create_order(sid, uid, pid, p["name"], qty, total, keys)
+        except Exception:
+            # fallback (still unique enough) if DB insert fails
+            try:
+                order_id = gen_order_id(10)
+            except Exception:
+                order_id = str(ts())
+
+        try:
+            log_tx(sid, uid, "purchase", -total, f'{p["name"]} | {order_id}', qty)
+        except Exception:
+            pass
+
         link = (p["tg_link"] or "").strip()
 
         msg = (
@@ -1077,7 +1094,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             f"Product: <b>{esc(p['name'])}</b>\n"
             f"Qty: <b>{qty}</b>\n"
             f"Paid: <b>{money(total)} {esc(CURRENCY)}</b>\nOrder ID: <code>{order_id}</code>\n\n"
-            f"<b>Key(s):</b>\n" + "\n".join([f"<code>{esc(k)}</code>" for k in keys])
+            f"<b>Key(s):</b>\n" + ("\n".join([f"<code>{esc(k)}</code>" for k in keys]) if keys else "<i>No keys delivered.</i>")
         )
 
         rows = []
