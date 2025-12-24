@@ -2760,7 +2760,7 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-'''
+
 
 # write file
 out_path = Path("/mnt/data/main.py")
