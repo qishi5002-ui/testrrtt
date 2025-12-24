@@ -1312,10 +1312,14 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
 
         sid = int(r["shop_owner_id"])
         me = update.effective_user.id
+
+        # master shop deposits -> super admin only
+        # seller shop deposits -> seller owner only
         if not ((me == sid) or (sid == SUPER_ADMIN_ID and is_super(me))):
             conn.close()
             await update.callback_query.message.reply_text("❌ Not allowed.")
             return
+
         if r["status"] != "pending":
             conn.close()
             await update.callback_query.message.reply_text("Already handled.")
@@ -1323,51 +1327,57 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
 
         user_id = int(r["user_id"])
         amt = float(r["amount"])
-        method_name = (r["method_name"] if "method_name" in r.keys() else "") or ""
+
+        notified = False
+        status_word = "APPROVED" if decision == "ok" else "REJECTED"
 
         if decision == "ok":
             add_balance(sid, user_id, amt)
-            log_tx(sid, user_id, "deposit", amt, method_name)
+            log_tx(sid, user_id, "deposit", amt, "")
             cur.execute("UPDATE deposit_requests SET status='approved', handled_by=?, handled_at=? WHERE id=?",
                         (me, ts(), rid))
             conn.commit(); conn.close()
             try:
-                await context.bot.send_message(user_id, f"✅ Deposited ({method_disp}): {money(amt)} {CURRENCY}\nTotal Balance: {money(get_balance(sid, user_id))} {CURRENCY}")
+                await context.bot.send_message(
+                    user_id,
+                    f"✅ Deposit Approved\nAmount: {money(amt)} {CURRENCY}\nTotal Balance: {money(get_balance(sid, user_id))} {CURRENCY}"
+                )
+                notified = True
             except Exception:
-                pass
+                notified = False
         else:
             cur.execute("UPDATE deposit_requests SET status='rejected', handled_by=?, handled_at=? WHERE id=?",
                         (me, ts(), rid))
             conn.commit(); conn.close()
             try:
-                await context.bot.send_message(user_id, f"❌ Deposit Rejected: {money(amt)} {CURRENCY}")
+                await context.bot.send_message(user_id, f"❌ Deposit Rejected\nAmount: {money(amt)} {CURRENCY}")
+                notified = True
             except Exception:
-                pass
+                notified = False
 
-                # show decision on admin message (so you can see it was approved/rejected)
+        # Update the admin request message so it visibly shows it was handled
         try:
-            if update.callback_query.message.photo:
-                await update.callback_query.edit_message_caption(
-                    caption=(update.callback_query.message.caption or "") + f"\n\n✅ Status: {('APPROVED' if decision=='ok' else 'REJECTED')}",
+            q = update.callback_query
+            base_caption = (q.message.caption or "").strip() if q.message else ""
+            base_text = (q.message.text or "").strip() if q.message else ""
+            suffix = f"\n\n✅ Status: <b>{status_word}</b>\nHandled by: <b>{esc(user_display(me))}</b>\nUser notified: <b>{'YES' if notified else 'NO'}</b>"
+            if q.message and q.message.photo:
+                await q.edit_message_caption(
+                    caption=(base_caption + suffix).strip(),
                     parse_mode=ParseMode.HTML,
                     reply_markup=None
                 )
             else:
-                await update.callback_query.edit_message_text(
-                    text=(update.callback_query.message.text or "") + f"\n\n✅ Status: {('APPROVED' if decision=='ok' else 'REJECTED')}",
+                await q.edit_message_text(
+                    text=(base_text + suffix).strip(),
                     parse_mode=ParseMode.HTML,
                     reply_markup=None
                 )
         except Exception:
             pass
 
-# delete admin request message
-        try:
-            await safe_delete(context.bot, int(r["admin_chat_id"]), int(r["admin_msg_id"]))
-        except Exception:
-            pass
-
     # ---------- History ----------
+
     async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         sid = current_shop_id()
@@ -1511,6 +1521,14 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return
         uid = update.effective_user.id
         ensure_seller(uid)
+
+        if is_banned_user(SUPER_ADMIN_ID, uid):
+            await update.callback_query.message.reply_text("❌ You are banned/restricted from Main Shop.", reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]]))
+            return
+        sr = seller_row(uid)
+        if sr and (int(sr["banned_shop"] or 0) == 1 or int(sr["restricted_until"] or 0) > ts()):
+            await update.callback_query.message.reply_text("❌ Your seller shop is banned/restricted. You cannot top up subscription.", reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]]))
+            return
         s = get_shop_settings(SUPER_ADMIN_ID)
         desc = (s["connect_desc"] or "").strip()
         bal = get_balance(SUPER_ADMIN_ID, uid)
@@ -1532,6 +1550,15 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         plan = update.callback_query.data.split(":")[2]  # a/b
         uid = update.effective_user.id
         ensure_seller(uid)
+
+        # Block banned/restricted users from buying subscription
+        if is_banned_user(SUPER_ADMIN_ID, uid):
+            await update.callback_query.message.reply_text("❌ You are banned/restricted from Main Shop.")
+            return
+        sr = seller_row(uid)
+        if sr and (int(sr["banned_shop"] or 0) == 1 or int(sr["restricted_until"] or 0) > ts()):
+            await update.callback_query.message.reply_text("❌ Your seller shop is banned/restricted. You cannot renew subscription.")
+            return
         cur_plan = seller_plan(uid)
 
         if cur_plan == "whitelabel" and plan == "a":
@@ -1645,6 +1672,15 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         uid = update.effective_user.id
         plan = update.callback_query.data.split(":")[2]
         ensure_seller(uid)
+
+        # Block banned/restricted users from renewing subscription
+        if is_banned_user(SUPER_ADMIN_ID, uid):
+            await update.callback_query.message.reply_text("❌ You are banned/restricted from Main Shop.")
+            return
+        sr = seller_row(uid)
+        if sr and (int(sr["banned_shop"] or 0) == 1 or int(sr["restricted_until"] or 0) > ts()):
+            await update.callback_query.message.reply_text("❌ Your seller shop is banned/restricted. You cannot renew subscription.")
+            return
         cur_plan = seller_plan(uid)
         if cur_plan == "whitelabel" and plan == "a":
             await update.callback_query.message.reply_text("❌ White-Label cannot pay $5. Choose Plan B.")
