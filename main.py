@@ -785,10 +785,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
                 pass
 
         uid = update.effective_user.id
-        if bot_kind == "seller":
-            await context.bot.send_message(update.effective_chat.id, "Choose:", reply_markup=seller_menu(uid, shop_owner_id))
-        else:
-            await context.bot.send_message(update.effective_chat.id, "Choose:", reply_markup=master_menu(uid))
+        await show_welcome(update, context)
 
     # ---------- Products (Category -> Sub -> Product) ----------
     async def products_root(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -831,7 +828,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         if is_banned_user(sid, uid):
             await update.callback_query.message.reply_text("❌ You are restricted from this shop.")
             return
-        _, _, _, cat_s, sub_s = update.callback_query.data.split(":")
+        _, _, cat_s, sub_s = update.callback_query.data.split(":")
         cat_id = int(cat_s); sub_id = int(sub_s)
         prods = prod_list(sid, cat_id, sub_id)
         if not prods:
