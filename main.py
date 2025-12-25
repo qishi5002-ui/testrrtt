@@ -2533,7 +2533,8 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             if not q:
                 await update.message.reply_text("❌ Empty."); return
             conn = db(); cur = conn.cursor()
-            cur.execute("SELECT order_id FROM orders WHERE shop_owner_id=? AND UPPER(order_id) LIKE ? ORDER BY created_at DESC LIMIT 40", (sid, f"%{q.upper()}%"))
+            q_nodash = re.sub(r"[^A-Z0-9]", "", q)
+            cur.execute("SELECT order_id FROM orders WHERE shop_owner_id=? AND (UPPER(order_id) LIKE ? OR REPLACE(UPPER(order_id), '-', '') LIKE ?) ORDER BY created_at DESC LIMIT 60", (sid, f"%{q}%", f"%{q_nodash}%"))
             ids = [r["order_id"] for r in cur.fetchall()]
             conn.close()
             if not ids:
