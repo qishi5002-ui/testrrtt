@@ -415,6 +415,7 @@ def init_db():
 
     ensure_shop_settings(SUPER_ADMIN_ID)
     s = get_shop_settings(SUPER_ADMIN_ID)
+    s = dict(s)
     if not (s["welcome_text"] or "").strip():
         set_shop_setting(SUPER_ADMIN_ID, "welcome_text",
             f"✅ Welcome to <b>{esc(STORE_NAME)}</b>\nGet your 24/7 Store Panel Here !!\n\nBot created by @RekkoOwn\nGroup : @AutoPanels"
