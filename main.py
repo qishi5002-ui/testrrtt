@@ -1918,8 +1918,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             InlineKeyboardButton("📢 Broadcast", callback_data=f"a:bcast:{sid}"),
             InlineKeyboardButton("🖼 Edit Welcome", callback_data=f"a:welcome:{sid}"),
             InlineKeyboardButton("💳 Deposit Methods", callback_data=f"a:pm:{sid}"),
-            InlineKeyboardButton("🔎 Search Order ID", callback_data=f"a:osearch:{sid}"),
-            InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}"),
+InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}"),
             InlineKeyboardButton("⬅️ Menu", callback_data="m:menu"),
         ], 2)
 
@@ -2160,12 +2159,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         pm_delete(pm_id)
         await update.callback_query.message.reply_text("✅ Deleted.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"a:pm:{sid}")]]))
 
-    # ----- Order ID Search (Admin) -----
-    async def admin_order_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.callback_query.answer()
-        sid = int(update.callback_query.data.split(":")[2])
-        set_state(context, "order_search", {"shop_id": sid})
-        await update.callback_query.message.reply_text("Type Order ID to search (example: ORD-3F2A9C1B):", reply_markup=admin_panel_kb(sid))
 
 # Broadcast
     async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2574,22 +2567,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
                 clear_state(context)
                 await update.message.reply_text("✅ Updated.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"a:pm:{sid}")]]))
                 return
-
-        # order search (admin)
-        if state == "order_search":
-            sid = int(data["shop_id"])
-            q = (update.message.text or "").strip().upper()
-            clear_state(context)
-            if not q:
-                await update.message.reply_text("❌ Empty."); return
-            conn = db(); cur = conn.cursor()
-            q_nodash = re.sub(r"[^A-Z0-9]", "", q)
-            cur.execute("SELECT order_id FROM orders WHERE shop_owner_id=? AND (UPPER(order_id) LIKE ? OR REPLACE(UPPER(order_id),'-','') LIKE ?) ORDER BY created_at DESC LIMIT 60", (sid, f"%{q}%", f"%{q_nodash}%"))
-            ids = [r["order_id"] for r in cur.fetchall()]
-            conn.close()
-            if not ids:
-                await update.message.reply_text("No matches.", reply_markup=admin_panel_kb(sid))
-                return
             rows = [[InlineKeyboardButton(oid, callback_data=f"o:view:{sid}:{oid}")] for oid in ids]
             rows.append([InlineKeyboardButton("⬅️ Admin", callback_data="m:admin")])
             await update.message.reply_text("Matches:", reply_markup=kb(rows))
@@ -2873,8 +2850,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             await admin_pm_edit(update, context); return
         if data.startswith("apm:del:"):
             await admin_pm_delete(update, context); return
-        if data.startswith("a:osearch:"):
-            await admin_order_search_start(update, context); return
         if data.startswith("pm:editdefault:"):
             await pm_edit_default(update, context); return
         if data.startswith("apm:add:"):
