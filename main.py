@@ -414,7 +414,7 @@ def init_db():
     conn.commit(); conn.close()
 
     ensure_shop_settings(SUPER_ADMIN_ID)
-    s = get_shop_settings(SUPER_ADMIN_ID)
+    s = dict(get_shop_settings(SUPER_ADMIN_ID))
     s = dict(s)
     if not (s["welcome_text"] or "").strip():
         set_shop_setting(SUPER_ADMIN_ID, "welcome_text",
@@ -1763,7 +1763,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             )
             return
 
-        s = get_shop_settings(SUPER_ADMIN_ID)
+        s = dict(get_shop_settings(SUPER_ADMIN_ID))
         desc = (s["connect_desc"] or "").strip()
         bal = get_balance(SUPER_ADMIN_ID, uid)
         cur_plan = seller_plan(uid)
@@ -2397,7 +2397,7 @@ InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}"),
         await update.callback_query.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
     async def sa_editui(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
-        s = get_shop_settings(SUPER_ADMIN_ID)
+        s = dict(get_shop_settings(SUPER_ADMIN_ID))
 
         def cur(k: str) -> str:
             return (s.get(k) or "").strip() or "(empty)"
