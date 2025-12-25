@@ -159,6 +159,111 @@ def parse_float(text: str) -> Optional[float]:
 def is_super(uid: int) -> bool:
     return uid == SUPER_ADMIN_ID
 
+# ---------------- LANGUAGE (multi-language UI) ----------------
+# NOTE: We keep a lightweight translation layer. Any missing key falls back to English.
+SUPPORTED_LANGS = {
+    "en": "English",
+    "id": "Bahasa Indonesia",
+    "ms": "Bahasa Melayu",
+    "th": "ไทย",
+    "vi": "Tiếng Việt",
+    "tl": "Filipino",
+    "zh": "中文（简体）",
+    "zh_hant": "中文（繁體）",
+    "ja": "日本語",
+    "ko": "한국어",
+    "ar": "العربية",
+    "hi": "हिन्दी",
+    "bn": "বাংলা",
+    "ur": "اردو",
+    "ru": "Русский",
+    "es": "Español",
+    "pt": "Português",
+    "fr": "Français",
+    "de": "Deutsch",
+    "it": "Italiano",
+    "tr": "Türkçe",
+    "fa": "فارسی",
+}
+
+TRANSLATIONS = {
+    "en": {
+        "btn_products": "🛒 Products",
+        "btn_wallet": "💰 Wallet",
+        "btn_history": "📜 History",
+        "btn_support": "🆘 Support / Feedback",
+        "btn_connect": "🤖 Connect My Bot",
+        "btn_admin": "🛠 Admin Panel",
+        "btn_super": "👑 Super Admin",
+        "btn_extend": "⏳ Extend Subscription",
+        "btn_lang": "🌐 Language",
+        "lang_title": "🌐 <b>Choose Language</b>",
+        "lang_saved": "✅ Language saved.",
+        "ask_order_id": "Send Order ID (example: ABC12345):",
+        "no_match": "❌ No match found.",
+        "order_found": "✅ <b>Order Found</b>",
+    },
+    "id": {
+        "btn_products": "🛒 Produk",
+        "btn_wallet": "💰 Dompet",
+        "btn_history": "📜 Riwayat",
+        "btn_support": "🆘 Bantuan / Masukan",
+        "btn_connect": "🤖 Hubungkan Bot Saya",
+        "btn_admin": "🛠 Panel Admin",
+        "btn_super": "👑 Super Admin",
+        "btn_extend": "⏳ Perpanjang Langganan",
+        "btn_lang": "🌐 Bahasa",
+        "lang_title": "🌐 <b>Pilih Bahasa</b>",
+        "lang_saved": "✅ Bahasa disimpan.",
+        "ask_order_id": "Kirim Order ID (contoh: ABC12345):",
+        "no_match": "❌ Tidak ditemukan.",
+        "order_found": "✅ <b>Pesanan Ditemukan</b>",
+    },
+    "zh": {
+        "btn_products": "🛒 商品",
+        "btn_wallet": "💰 钱包",
+        "btn_history": "📜 记录",
+        "btn_support": "🆘 支持 / 反馈",
+        "btn_connect": "🤖 连接我的机器人",
+        "btn_admin": "🛠 管理面板",
+        "btn_super": "👑 超级管理员",
+        "btn_extend": "⏳ 延长订阅",
+        "btn_lang": "🌐 语言",
+        "lang_title": "🌐 <b>选择语言</b>",
+        "lang_saved": "✅ 已保存语言。",
+        "ask_order_id": "发送订单号 (例如: ABC12345):",
+        "no_match": "❌ 未找到。",
+        "order_found": "✅ <b>已找到订单</b>",
+    },
+}
+
+def tr(uid: int, key: str, fallback: str = "") -> str:
+    lang = get_user_lang(uid)
+    d = TRANSLATIONS.get(lang) or TRANSLATIONS.get("en") or {}
+    if key in d:
+        return d[key]
+    return (TRANSLATIONS.get("en") or {}).get(key, fallback or key)
+
+def get_user_lang(uid: int) -> str:
+    try:
+        conn = db(); cur = conn.cursor()
+        cur.execute("SELECT lang FROM user_prefs WHERE user_id=?", (int(uid),))
+        r = cur.fetchone()
+        conn.close()
+        lang = (r["lang"] if r else "en") or "en"
+        return lang if lang in SUPPORTED_LANGS else "en"
+    except Exception:
+        return "en"
+
+def set_user_lang(uid: int, lang: str):
+    lang = (lang or "en").strip()
+    if lang not in SUPPORTED_LANGS:
+        lang = "en"
+    conn = db(); cur = conn.cursor()
+    cur.execute("INSERT INTO user_prefs(user_id, lang) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET lang=excluded.lang",
+                (int(uid), lang))
+    conn.commit(); conn.close()
+
 # ---------------- DB ----------------
 def db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
@@ -180,6 +285,7 @@ def init_db():
     conn = db(); cur = conn.cursor()
 
     cur.execute("CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY, username TEXT DEFAULT '', first_name TEXT DEFAULT '', last_name TEXT DEFAULT '', last_seen INTEGER DEFAULT 0)")
+    cur.execute("CREATE TABLE IF NOT EXISTS user_prefs(user_id INTEGER PRIMARY KEY, lang TEXT DEFAULT 'en')")
     cur.execute("CREATE TABLE IF NOT EXISTS sessions(user_id INTEGER PRIMARY KEY, shop_owner_id INTEGER NOT NULL, locked INTEGER DEFAULT 0)")
 
     cur.execute("""
@@ -941,37 +1047,41 @@ def render_welcome_text(shop_owner_id: int) -> str:
     return (cleaned + "\n\n" + BRAND_LINE).strip() if cleaned else BRAND_LINE
 
 
+
 # ---------------- MENUS ----------------
 def master_menu(uid: int) -> InlineKeyboardMarkup:
     btns = [
-        InlineKeyboardButton("🛒 Products", callback_data="m:products"),
-        InlineKeyboardButton("💰 Wallet", callback_data="m:wallet"),
-        InlineKeyboardButton("📜 History", callback_data="m:history"),
-        InlineKeyboardButton("🆘 Support / Feedback", callback_data="m:support"),
-        InlineKeyboardButton("🤖 Connect My Bot", callback_data="m:connect"),
+        InlineKeyboardButton(tr(uid, "btn_products"), callback_data="m:products"),
+        InlineKeyboardButton(tr(uid, "btn_wallet"), callback_data="m:wallet"),
+        InlineKeyboardButton(tr(uid, "btn_history"), callback_data="m:history"),
+        InlineKeyboardButton(tr(uid, "btn_support"), callback_data="m:support"),
+        InlineKeyboardButton(tr(uid, "btn_connect"), callback_data="m:connect"),
+        InlineKeyboardButton(tr(uid, "btn_lang"), callback_data="m:lang"),
     ]
     if is_super(uid):
         btns += [
-            InlineKeyboardButton("🛠 Admin Panel", callback_data="m:admin"),
-            InlineKeyboardButton("👑 Super Admin", callback_data="m:super"),
+            InlineKeyboardButton(tr(uid, "btn_admin"), callback_data="m:admin"),
+            InlineKeyboardButton(tr(uid, "btn_super"), callback_data="m:super"),
         ]
     return grid(btns, 2)
 
 def seller_menu(uid: int, seller_id: int) -> InlineKeyboardMarkup:
     btns = [
-        InlineKeyboardButton("🛒 Products", callback_data="m:products"),
-        InlineKeyboardButton("💰 Wallet", callback_data="m:wallet"),
-        InlineKeyboardButton("📜 History", callback_data="m:history"),
-        InlineKeyboardButton("🆘 Support / Feedback", callback_data="m:support"),
+        InlineKeyboardButton(tr(uid, "btn_products"), callback_data="m:products"),
+        InlineKeyboardButton(tr(uid, "btn_wallet"), callback_data="m:wallet"),
+        InlineKeyboardButton(tr(uid, "btn_history"), callback_data="m:history"),
+        InlineKeyboardButton(tr(uid, "btn_support"), callback_data="m:support"),
+        InlineKeyboardButton(tr(uid, "btn_lang"), callback_data="m:lang"),
     ]
     if uid == seller_id or is_super(uid):
         btns += [
-            InlineKeyboardButton("🛠 Admin Panel", callback_data="m:admin"),
-            InlineKeyboardButton("⏳ Extend Subscription", callback_data="m:extend"),
+            InlineKeyboardButton(tr(uid, "btn_admin"), callback_data="m:admin"),
+            InlineKeyboardButton(tr(uid, "btn_extend"), callback_data="m:extend"),
         ]
     return grid(btns, 2)
 
-# ---------------- MULTI-BOT MANAGER ----------------
+
+# ---------------- MULTI-BOT MANAGER ----------------# ---------------- MULTI-BOT MANAGER ----------------
 class BotManager:
     def __init__(self):
         self.apps: Dict[int, Application] = {}
@@ -1975,7 +2085,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             InlineKeyboardButton("📢 Broadcast", callback_data=f"a:bcast:{sid}"),
             InlineKeyboardButton("🖼 Edit Welcome", callback_data=f"a:welcome:{sid}"),
             InlineKeyboardButton("💳 Deposit Methods", callback_data=f"a:pm:{sid}"),
-InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}"),
+            InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}"),
             InlineKeyboardButton("⬅️ Menu", callback_data="m:menu"),
         ], 2)
 
@@ -2536,7 +2646,38 @@ InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}"),
                 pass
             await update.callback_query.message.reply_text("✅ Warning sent.")
 
-    # ---------- TEXT/MEDIA INPUT (all flows) ----------
+    
+    # ---------- Language ----------
+    async def language_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
+        uid = update.effective_user.id
+        rows = []
+        cur = get_user_lang(uid)
+        for code, name in SUPPORTED_LANGS.items():
+            label = f"{'✅ ' if code==cur else ''}{name}"
+            rows.append([InlineKeyboardButton(label, callback_data=f"lang:set:{code}")])
+        rows.append([InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")])
+        await update.callback_query.message.reply_text(tr(uid, "lang_title"), parse_mode=ParseMode.HTML, reply_markup=kb(rows))
+
+    async def language_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
+        uid = update.effective_user.id
+        code = update.callback_query.data.split(":")[2]
+        set_user_lang(uid, code)
+        await update.callback_query.message.reply_text(tr(uid, "lang_saved"), reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]]))
+
+    # ---------- Admin: Search Order ID (text search) ----------
+    async def admin_order_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
+        uid = update.effective_user.id
+        if not can_use_admin(uid):
+            await update.callback_query.message.reply_text("❌ Not allowed.")
+            return
+        sid = int(update.callback_query.data.split(":")[2])
+        set_state(context, "order_search", {"shop_id": sid})
+        await update.callback_query.message.reply_text(tr(uid, "ask_order_id"), reply_markup=admin_panel_kb(sid))
+
+# ---------- TEXT/MEDIA INPUT (all flows) ----------
     async def text_or_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         upsert_user(update.effective_user)
         state, data = get_state(context)
@@ -2701,6 +2842,45 @@ InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}"),
         # super search
         if state == "super_search":
             await super_search_text(update, context); return
+
+        # order id search (admin)
+        if state == "order_search":
+            sid = int(data.get("shop_id") or 0)
+            oid = (update.message.text or "").strip()
+            clear_state(context)
+            if not oid:
+                await update.message.reply_text(tr(update.effective_user.id, "no_match"), reply_markup=admin_panel_kb(sid))
+                return
+            o = get_order_by_id(oid) if 'get_order_by_id' in globals() else None
+            # Fallback to get_order() if present
+            if not o and 'get_order' in globals():
+                o = get_order(sid, oid)
+            if not o:
+                await update.message.reply_text(tr(update.effective_user.id, "no_match"), reply_markup=admin_panel_kb(sid))
+                return
+            # Ensure shop matches
+            try:
+                if sid and int(o.get("shop_owner_id") if hasattr(o,'get') else o["shop_owner_id"]) != sid:
+                    await update.message.reply_text(tr(update.effective_user.id, "no_match"), reply_markup=admin_panel_kb(sid))
+                    return
+            except Exception:
+                pass
+            created = int(o["created_at"] or 0)
+            dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created)) if created else "-"
+            keys = (o["keys_text"] or "").strip()
+            delivered = "\n".join([f"<code>{esc(k)}</code>" for k in keys.splitlines() if k.strip()]) or "-"
+            msg = (
+                f"{tr(update.effective_user.id, 'order_found')}\n\n"
+                f"Order ID: <code>{esc(oid)}</code>\n"
+                f"Date: <b>{esc(dt)}</b>\n"
+                f"User: <b>{esc(user_display(int(o['user_id'])) )}</b>\n"
+                f"Product: <b>{esc(o['product_name'])}</b>\n"
+                f"Qty: <b>{int(o['qty'] or 1)}</b>\n"
+                f"Total: <b>{money(float(o['total'] or 0))} {esc(CURRENCY)}</b>\n\n"
+                f"<b>Delivered Key(s):</b>\n{delivered}"
+            )
+            await update.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=admin_panel_kb(sid))
+            return
 
         # ---- Manage Catalog states ----
         if state == "mg_addcat":
@@ -2904,6 +3084,17 @@ InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}"),
 
         if data.startswith("a:reply:"):
             await admin_reply_start(update, context); return
+
+
+        # language
+        if data == "m:lang":
+            await language_menu(update, context); return
+        if data.startswith("lang:set:"):
+            await language_set(update, context); return
+
+        # order id search (admin)
+        if data.startswith("a:osearch:"):
+            await admin_order_search_start(update, context); return
 
         # connect
         if data == "m:connect":
