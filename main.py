@@ -63,10 +63,11 @@ PLAN_B_PRICE = float((os.getenv("PLAN_B_PRICE") or "10").strip() or "10")   # $1
 PLAN_DAYS = int((os.getenv("PLAN_DAYS") or "30").strip() or "30")
 MASTER_BOT_USERNAME = (os.getenv("MASTER_BOT_USERNAME") or "").strip().lstrip("@")
 
-BRAND_CREATED_BY = (os.getenv("BRAND_CREATED_BY") or "Bot created by @RekkoOwn").strip()
-BRAND_GROUP = (os.getenv("BRAND_GROUP") or "Group : @AutoPanels").strip()
-BRAND_LINE = (BRAND_CREATED_BY + "
-" + BRAND_GROUP).strip()
+# -------- Branding (ENV) --------
+BRAND_CREATED_BY = os.getenv("BRAND_CREATED_BY", "Bot created by @RekkoOwn")
+BRAND_GROUP = os.getenv("BRAND_GROUP", "Group : @AutoPanels")
+
+BRAND_LINE = f"{BRAND_CREATED_BY}\n{BRAND_GROUP}"
 
 if not BOT_TOKEN:
     raise RuntimeError("Missing BOT_TOKEN")
