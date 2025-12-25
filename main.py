@@ -63,7 +63,9 @@ PLAN_B_PRICE = float((os.getenv("PLAN_B_PRICE") or "10").strip() or "10")   # $1
 PLAN_DAYS = int((os.getenv("PLAN_DAYS") or "30").strip() or "30")
 MASTER_BOT_USERNAME = (os.getenv("MASTER_BOT_USERNAME") or "").strip().lstrip("@")
 
-BRAND_LINE = "Bot created by @RekkoOwn\nGroup : @AutoPanels"
+BRAND_LINE = "Bot created by @RekkoOwn
+Group : @AutoPanels
+Group : @AutoPanels"
 
 if not BOT_TOKEN:
     raise RuntimeError("Missing BOT_TOKEN")
@@ -109,6 +111,14 @@ def create_order(shop_owner_id: int, user_id: int, product_id: int, product_name
         except sqlite3.IntegrityError:
             order_id = gen_order_id(10)
             continue
+        except Exception:
+            # Schema mismatch / table missing in older DBs should not block delivery
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            conn.close()
+            return order_id
     conn.close()
     return order_id
 
@@ -277,6 +287,16 @@ def init_db():
         admin_msg_id INTEGER DEFAULT 0
     )""")
 
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS deposit_methods(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        shop_owner_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        pay_text TEXT NOT NULL,
+        enabled INTEGER DEFAULT 1,
+        sort_order INTEGER DEFAULT 0
+    )""")
     cur.execute("""
     CREATE TABLE IF NOT EXISTS tickets(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -353,7 +373,8 @@ def init_db():
     s = get_shop_settings(SUPER_ADMIN_ID)
     if not (s["welcome_text"] or "").strip():
         set_shop_setting(SUPER_ADMIN_ID, "welcome_text",
-            f"✅ Welcome to <b>{esc(STORE_NAME)}</b>\nGet your 24/7 Store Panel Here !!\n\nBot created by @RekkoOwn"
+            f"✅ Welcome to <b>{esc(STORE_NAME)}</b>\nGet your 24/7 Store Panel Here !!\n\nBot created by @RekkoOwn
+Group : @AutoPanels"
         )
     if not (s["connect_desc"] or "").strip():
         set_shop_setting(SUPER_ADMIN_ID, "connect_desc",
@@ -787,6 +808,37 @@ def pop_keys(shop_owner_id: int, pid: int, uid: int, qty: int) -> List[str]:
     conn.commit(); conn.close()
     return keys
 
+
+# --- deposit methods ---
+def dep_methods_list(shop_owner_id: int) -> List[sqlite3.Row]:
+    conn = db(); cur = conn.cursor()
+    cur.execute("SELECT * FROM deposit_methods WHERE shop_owner_id=? AND enabled=1 ORDER BY sort_order ASC, id ASC", (shop_owner_id,))
+    rows = cur.fetchall(); conn.close()
+    return rows
+
+def dep_method_get(shop_owner_id: int, mid: int) -> Optional[sqlite3.Row]:
+    conn = db(); cur = conn.cursor()
+    cur.execute("SELECT * FROM deposit_methods WHERE shop_owner_id=? AND id=?", (shop_owner_id, mid))
+    r = cur.fetchone(); conn.close()
+    return r
+
+def dep_method_add(shop_owner_id: int, name: str, pay_text: str):
+    conn = db(); cur = conn.cursor()
+    cur.execute("INSERT INTO deposit_methods(shop_owner_id,name,pay_text,enabled,sort_order) VALUES(?,?,?,?,0)",
+                (shop_owner_id, name.strip(), pay_text.strip(), 1))
+    conn.commit(); conn.close()
+
+def dep_method_update(shop_owner_id: int, mid: int, name: str, pay_text: str):
+    conn = db(); cur = conn.cursor()
+    cur.execute("UPDATE deposit_methods SET name=?, pay_text=? WHERE shop_owner_id=? AND id=?",
+                (name.strip(), pay_text.strip(), shop_owner_id, mid))
+    conn.commit(); conn.close()
+
+def dep_method_delete(shop_owner_id: int, mid: int):
+    conn = db(); cur = conn.cursor()
+    cur.execute("DELETE FROM deposit_methods WHERE shop_owner_id=? AND id=?", (shop_owner_id, mid))
+    conn.commit(); conn.close()
+
 # --- support ---
 def get_open_ticket(shop_owner_id: int, user_id: int) -> Optional[int]:
     conn = db(); cur = conn.cursor()
@@ -1108,10 +1160,10 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         await update.callback_query.message.reply_text("✅ Quantity updated.", reply_markup=kb([[InlineKeyboardButton("🔄 Refresh", callback_data=f"p:prod:{pid}")]]))
 
     async def product_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
         await update.callback_query.answer()
         sid = current_shop_id()
         uid = update.effective_user.id
-
         if is_banned_user(sid, uid):
             await update.callback_query.message.reply_text("❌ You are restricted from this shop.")
             return
@@ -1140,98 +1192,51 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             )
             return
 
-        # We make delivery extremely robust:
-        # - deduct balance
-        # - pop keys
-        # - always send something to the user (even if DB insert fails)
-        # - if any unexpected error occurs, we refund and alert super admin
-        order_id = gen_order_id(10)
-        keys: List[str] = []
+        set_balance(sid, uid, bal - total)
+        keys = pop_keys(sid, pid, uid, qty)
+
+        order_id = ''
+        try:
+            order_id = ""
+        try:
+            order_id = create_order(sid, uid, pid, p["name"], qty, total, keys)
+        except Exception:
+            order_id = gen_order_id(10)
+        except Exception:
+            # If orders table is missing or any DB error happens, still deliver to user.
+            order_id = gen_order_id(10)
+        try:
+            log_tx(sid, uid, "purchase", -total, f"{p['name']} | {order_id}", qty)
+        except Exception:
+            pass
+
         link = (p["tg_link"] or "").strip()
 
+        msg = (
+            f"✅ <b>Purchase Successful</b>\n\n"
+            f"Order ID: <b>{esc(order_id)}</b>\n"
+            f"Product: <b>{esc(p['name'])}</b>\n"
+            f"Qty: <b>{qty}</b>\n"
+            f"Paid: <b>{money(total)} {esc(CURRENCY)}</b>\n\n"
+            f"<b>Key(s):</b>\n"
+            + ("\n".join([f"<code>{esc(k)}</code>" for k in (keys or [])]) or "<i>No key delivered.</i>")
+        )
+
+        rows = []
+        if link:
+            rows.append([InlineKeyboardButton("📦 Get File", callback_data=f"p:file:{pid}")])
+        rows.append([InlineKeyboardButton("🏠 Menu", callback_data="m:menu")])
+
+        await update.callback_query.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
+
         try:
-            set_balance(sid, uid, bal - total)
-            keys = pop_keys(sid, pid, uid, qty)
-
-            try:
-                order_id = create_order(sid, uid, pid, p["name"], qty, total, keys)
-            except Exception:
-                # Still proceed with a generated order_id if orders DB insert fails
-                order_id = order_id or gen_order_id(10)
-
-            try:
-                log_tx(sid, uid, "purchase", -total, f"{p['name']} | {order_id}", qty)
-            except Exception:
-                pass
-
-            msg = (
-                f"✅ <b>Purchase Successful</b>\n\n"
-                f"Order ID: <b>{esc(order_id)}</b>\n"
-                f"Product: <b>{esc(p['name'])}</b>\n"
-                f"Qty: <b>{qty}</b>\n"
-                f"Paid: <b>{money(total)} {esc(CURRENCY)}</b>\n\n"
-                f"<b>Key(s):</b>\n"
-                + ("\n".join([f"<code>{esc(k)}</code>" for k in (keys or [])]) or "<i>No key delivered.</i>")
+            keys_block = "\n".join(keys) if keys else "-"
+            await context.bot.send_message(
+                SUPER_ADMIN_ID,
+                f"🔔 Order\nOrder ID: {order_id}\nShop: {user_display(shop_owner_id) if bot_kind=='seller' else 'Main'}\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}\n\nKeys:\n{keys_block}",
             )
-
-            rows = []
-            if link:
-                rows.append([InlineKeyboardButton("📦 Get File", callback_data=f"p:file:{pid}")])
-            rows.append([InlineKeyboardButton("🏠 Menu", callback_data="m:menu")])
-
-            await update.callback_query.message.reply_text(
-                msg, parse_mode=ParseMode.HTML, reply_markup=kb(rows)
-            )
-
-            # Notify admins (always include order_id and keys)
-            try:
-                keys_block = "\n".join(keys) if keys else "-"
-                shop_label = STORE_NAME if sid == SUPER_ADMIN_ID else user_display(sid)
-                await context.bot.send_message(
-                    SUPER_ADMIN_ID,
-                    f"🔔 Order\n"
-                    f"Order ID: {order_id}\n"
-                    f"Shop: {shop_label}\n"
-                    f"User: {user_display(uid)}\n"
-                    f"Product: {p['name']}\n"
-                    f"Qty: {qty}\n"
-                    f"Total: {money(total)} {CURRENCY}\n\n"
-                    f"Keys:\n{keys_block}"
-                )
-                if bot_kind == "seller":
-                    try:
-                        await context.bot.send_message(
-                            shop_owner_id,
-                            f"🔔 New purchase\n"
-                            f"Order ID: {order_id}\n"
-                            f"User: {user_display(uid)}\n"
-                            f"Product: {p['name']}\n"
-                            f"Qty: {qty}\n"
-                            f"Total: {money(total)} {CURRENCY}"
-                        )
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-        except Exception as e:
-            log.exception("purchase failed")
-            # refund (best-effort)
-            try:
-                set_balance(sid, uid, bal)
-            except Exception:
-                pass
-            try:
-                await update.callback_query.message.reply_text(
-                    "❌ Purchase failed (internal error). Your balance was restored. Please try again."
-                )
-            except Exception:
-                pass
-            try:
-                await context.bot.send_message(SUPER_ADMIN_ID, f"❌ Purchase error for {uid}: {e}")
-            except Exception:
-                pass
-
+        except Exception:
+            pass
     async def _extract_channel_username(link: str) -> Optional[str]:
         link = (link or "").strip()
         if not link:
