@@ -165,6 +165,17 @@ def db() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     return conn
 
+
+def ensure_column(table: str, col: str, col_def_sql: str):
+    """Add a missing column safely (SQLite)."""
+    conn = db(); cur = conn.cursor()
+    cur.execute(f"PRAGMA table_info({table})")
+    cols = {r[1] for r in cur.fetchall()}
+    if col not in cols:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {col_def_sql}")
+        conn.commit()
+    conn.close()
+
 def init_db():
     conn = db(); cur = conn.cursor()
 
@@ -313,6 +324,8 @@ def init_db():
         ticket_id INTEGER NOT NULL,
         sender_id INTEGER NOT NULL,
         text TEXT NOT NULL,
+        file_id TEXT DEFAULT '',
+        file_type TEXT DEFAULT '',
         created_at INTEGER NOT NULL
     )""")
 
@@ -367,6 +380,13 @@ def init_db():
         keys_text TEXT DEFAULT '',
         created_at INTEGER NOT NULL
     )""")
+    # --- migrations (safe) ---
+    try:
+        ensure_column('ticket_messages', 'file_id', "file_id TEXT DEFAULT ''")
+        ensure_column('ticket_messages', 'file_type', "file_type TEXT DEFAULT ''")
+    except Exception:
+        pass
+
     conn.commit(); conn.close()
 
     ensure_shop_settings(SUPER_ADMIN_ID)
@@ -856,14 +876,13 @@ def create_ticket(shop_owner_id: int, user_id: int) -> int:
     conn.commit(); conn.close()
     return int(tid)
 
-def add_ticket_msg(ticket_id: int, sender_id: int, text: str):
+def add_ticket_msg(ticket_id: int, sender_id: int, text: str, file_id: str = "", file_type: str = ""):
     conn = db(); cur = conn.cursor()
-    cur.execute("INSERT INTO ticket_messages(ticket_id,sender_id,text,created_at) VALUES(?,?,?,?)",
-                (ticket_id, sender_id, text, ts()))
+    cur.execute("INSERT INTO ticket_messages(ticket_id,sender_id,text,file_id,file_type,created_at) VALUES(?,?,?,?,?,?)",
+                (ticket_id, sender_id, text, file_id or "", file_type or "", ts()))
     cur.execute("UPDATE tickets SET updated_at=? WHERE id=?", (ts(), ticket_id))
     conn.commit(); conn.close()
 
-# ---------------- BRANDING (WELCOME ONLY) ----------------
 def _strip_branding(text: str) -> str:
     lines = (text or "").splitlines()
     out = []
@@ -897,7 +916,7 @@ def master_menu(uid: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🛒 Products", callback_data="m:products"),
         InlineKeyboardButton("💰 Wallet", callback_data="m:wallet"),
         InlineKeyboardButton("📜 History", callback_data="m:history"),
-        InlineKeyboardButton("🆘 Support", callback_data="m:support"),
+        InlineKeyboardButton("🆘 Support / Feedback", callback_data="m:support"),
         InlineKeyboardButton("🤖 Connect My Bot", callback_data="m:connect"),
     ]
     if is_super(uid):
@@ -912,7 +931,7 @@ def seller_menu(uid: int, seller_id: int) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🛒 Products", callback_data="m:products"),
         InlineKeyboardButton("💰 Wallet", callback_data="m:wallet"),
         InlineKeyboardButton("📜 History", callback_data="m:history"),
-        InlineKeyboardButton("🆘 Support", callback_data="m:support"),
+        InlineKeyboardButton("🆘 Support / Feedback", callback_data="m:support"),
     ]
     if uid == seller_id or is_super(uid):
         btns += [
@@ -1572,9 +1591,9 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         if is_banned_user(sid, uid):
             await update.callback_query.message.reply_text("❌ You are restricted from this shop.")
             return
-        set_state(context, "support_draft", {"shop_id": sid, "text": ""})
+        set_state(context, "support_draft", {"shop_id": sid, "items": []})
         await update.callback_query.message.reply_text(
-            "Type your support message. Press DONE when finished.",
+            "Send your support / feedback (TEXT, PHOTO, or VIDEO). Press DONE when finished.",
             reply_markup=kb([
                 [InlineKeyboardButton("✅ DONE", callback_data="s:done")],
                 [InlineKeyboardButton("❌ Cancel", callback_data="m:menu")]
@@ -1585,12 +1604,33 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         state, data = get_state(context)
         if state != "support_draft":
             return
-        t = (update.message.text or "").strip()
-        if not t:
+        msg = update.message
+        items = data.get("items") or []
+        if len(items) >= 5:
+            await msg.reply_text("❌ Max 5 messages per ticket. Press DONE.")
             return
-        data["text"] = (data.get("text", "") + ("\n" if data.get("text") else "") + t)[:3500]
+
+        file_id = ""
+        ftype = ""
+        text = ""
+        if msg.photo:
+            file_id = msg.photo[-1].file_id
+            ftype = "photo"
+            text = (msg.caption or "").strip() or "[photo]"
+        elif msg.video:
+            file_id = msg.video.file_id
+            ftype = "video"
+            text = (msg.caption or "").strip() or "[video]"
+        else:
+            text = (msg.text or "").strip()
+
+        if not (text or file_id):
+            return
+
+        items.append({"text": text[:3500], "file_id": file_id, "file_type": ftype})
+        data["items"] = items
         set_state(context, "support_draft", data)
-        await update.message.reply_text("Added. Press DONE.", reply_markup=kb([[InlineKeyboardButton("✅ DONE", callback_data="s:done")]]))
+        await msg.reply_text("✅ Added. Press DONE.", reply_markup=kb([[InlineKeyboardButton("✅ DONE", callback_data="s:done")]]))
 
     async def support_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
@@ -1600,25 +1640,35 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return
         sid = int(data["shop_id"])
         uid = update.effective_user.id
-        text = (data.get("text") or "").strip()
-        if not text:
+        items = data.get("items") or []
+        if not items:
             await update.callback_query.message.reply_text("Send a message first.")
             return
         clear_state(context)
 
         tid = get_open_ticket(sid, uid) or create_ticket(sid, uid)
-        add_ticket_msg(tid, uid, text)
+        for it in items:
+            add_ticket_msg(tid, uid, (it.get('text') or '').strip() or '[attachment]', it.get('file_id') or '', it.get('file_type') or '')
 
         await update.callback_query.message.reply_text("✅ Sent to support.", reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]]))
 
         owner = sid if sid != SUPER_ADMIN_ID else SUPER_ADMIN_ID
         try:
+            header = f"🆘 <b>Support Ticket</b>\nShop: <b>{esc(user_display(sid) if sid!=SUPER_ADMIN_ID else STORE_NAME)}</b>\nUser: {esc(user_display(uid))}"
             await context.bot.send_message(
-                owner,
-                f"🆘 <b>Support Ticket</b>\nShop: <b>{esc(user_display(sid) if sid!=SUPER_ADMIN_ID else STORE_NAME)}</b>\nUser: {esc(user_display(uid))}\n\n{esc(text)}",
-                parse_mode=ParseMode.HTML,
+                owner, header, parse_mode=ParseMode.HTML,
                 reply_markup=kb([[InlineKeyboardButton("↩️ Reply", callback_data=f"a:reply:{uid}:{sid}")]])
             )
+            for it in items:
+                t = (it.get('text') or '').strip()
+                fid = (it.get('file_id') or '').strip()
+                ftype = (it.get('file_type') or '').strip()
+                if fid and ftype == 'photo':
+                    await context.bot.send_photo(owner, photo=fid, caption=t or None)
+                elif fid and ftype == 'video':
+                    await context.bot.send_video(owner, video=fid, caption=t or None)
+                else:
+                    await context.bot.send_message(owner, t or ' ')
         except Exception:
             pass
 
@@ -2534,7 +2584,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
                 await update.message.reply_text("❌ Empty."); return
             conn = db(); cur = conn.cursor()
             q_nodash = re.sub(r"[^A-Z0-9]", "", q)
-            cur.execute("SELECT order_id FROM orders WHERE shop_owner_id=? AND (UPPER(order_id) LIKE ? OR REPLACE(UPPER(order_id), '-', '') LIKE ?) ORDER BY created_at DESC LIMIT 60", (sid, f"%{q}%", f"%{q_nodash}%"))
+            cur.execute("SELECT order_id FROM orders WHERE shop_owner_id=? AND (UPPER(order_id) LIKE ? OR REPLACE(UPPER(order_id),'-','') LIKE ?) ORDER BY created_at DESC LIMIT 60", (sid, f"%{q}%", f"%{q_nodash}%"))
             ids = [r["order_id"] for r in cur.fetchall()]
             conn.close()
             if not ids:
