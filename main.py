@@ -61,9 +61,6 @@ CURRENCY = (os.getenv("CURRENCY") or "USDT").strip()
 PLAN_A_PRICE = float((os.getenv("PLAN_A_PRICE") or "5").strip() or "5")     # $5 branded
 PLAN_B_PRICE = float((os.getenv("PLAN_B_PRICE") or "10").strip() or "10")   # $10 whitelabel
 PLAN_DAYS = int((os.getenv("PLAN_DAYS") or "30").strip() or "30")
-TRIAL_DAYS = int((os.getenv("TRIAL_DAYS") or "7").strip() or "7")
-PREMIUM_PRICE = float((os.getenv("PREMIUM_PRICE") or "5").strip() or "5")
-PREMIUM_DAYS = int((os.getenv("PREMIUM_DAYS") or "30").strip() or "30")
 MASTER_BOT_USERNAME = (os.getenv("MASTER_BOT_USERNAME") or "").strip().lstrip("@")
 
 BRAND_CREATED_BY = (os.getenv("BRAND_CREATED_BY") or "Bot created by @RekkoOwn").strip()
@@ -192,8 +189,7 @@ def init_db():
         plan TEXT DEFAULT 'branded', -- branded/whitelabel
         banned_shop INTEGER DEFAULT 0,
         banned_panel INTEGER DEFAULT 0,
-        restricted_until INTEGER DEFAULT 0,
-        trial_used INTEGER DEFAULT 0
+        restricted_until INTEGER DEFAULT 0
     )""")
 
     cur.execute("""
@@ -213,8 +209,32 @@ def init_db():
         welcome_text TEXT DEFAULT '',
         welcome_file_id TEXT DEFAULT '',
         welcome_file_type TEXT DEFAULT '', -- photo/video
-        connect_desc TEXT DEFAULT ''
+
+        -- Connect My Bot UI (editable by Super Admin)
+        connect_desc TEXT DEFAULT '',
+        connect_free_title TEXT DEFAULT '',
+        connect_free_desc TEXT DEFAULT '',
+        connect_premium_title TEXT DEFAULT '',
+        connect_premium_desc TEXT DEFAULT ''
     )""")
+    # migrate existing DBs (older shop_settings columns)
+    try:
+        cur.execute("ALTER TABLE shop_settings ADD COLUMN connect_free_title TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE shop_settings ADD COLUMN connect_free_desc TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE shop_settings ADD COLUMN connect_premium_title TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE shop_settings ADD COLUMN connect_premium_desc TEXT DEFAULT ''")
+    except Exception:
+        pass
+
 
     
     cur.execute("""
@@ -386,10 +406,6 @@ def init_db():
     )""")
     # --- migrations (safe) ---
     try:
-        ensure_column('sellers', 'trial_used', 'trial_used INTEGER DEFAULT 0')
-    except Exception:
-        pass
-    try:
         ensure_column('ticket_messages', 'file_id', "file_id TEXT DEFAULT ''")
         ensure_column('ticket_messages', 'file_type', "file_type TEXT DEFAULT ''")
     except Exception:
@@ -407,19 +423,25 @@ def init_db():
         set_shop_setting(SUPER_ADMIN_ID, "connect_desc",
             "🤖 <b>Connect My Bot</b>\n\n"
             "Create your own bot at @BotFather, then connect your token here.\n"
-            "Deposit to Main Shop wallet first.\n\n"
-            f"Plan A: <b>{money(PLAN_A_PRICE)} {esc(CURRENCY)}</b> / {PLAN_DAYS} days (Branded welcome)\n"
-            f"Plan B: <b>{money(PLAN_B_PRICE)} {esc(CURRENCY)}</b> / {PLAN_DAYS} days (White-Label)\n"
+            "Choose Free to Use (with branding) or Premium (no branding).\n"
         )
+    if not (s.get("connect_free_title") or "").strip():
+        set_shop_setting(SUPER_ADMIN_ID, "connect_free_title", "🆓 Free to Use")
+    if not (s.get("connect_free_desc") or "").strip():
+        set_shop_setting(SUPER_ADMIN_ID, "connect_free_desc", "Use the panel for free with branding enabled.")
+    if not (s.get("connect_premium_title") or "").strip():
+        set_shop_setting(SUPER_ADMIN_ID, "connect_premium_title", f"💎 Premium — {money(PLAN_A_PRICE)} {esc(CURRENCY)} / {PLAN_DAYS} days")
+    if not (s.get("connect_premium_desc") or "").strip():
+        set_shop_setting(SUPER_ADMIN_ID, "connect_premium_desc", "Remove branding and run White-Label.")
 
 # --- settings ---
 def ensure_shop_settings(shop_owner_id: int):
     conn = db(); cur = conn.cursor()
     cur.execute("SELECT 1 FROM shop_settings WHERE shop_owner_id=?", (shop_owner_id,))
     if not cur.fetchone():
-        cur.execute("""INSERT INTO shop_settings(shop_owner_id,wallet_message,welcome_text,welcome_file_id,welcome_file_type,connect_desc)
-                       VALUES(?,?,?,?,?,?)""",
-                    (shop_owner_id, "", "", "", "", ""))
+        cur.execute("""INSERT INTO shop_settings(shop_owner_id,wallet_message,welcome_text,welcome_file_id,welcome_file_type,connect_desc,connect_free_title,connect_free_desc,connect_premium_title,connect_premium_desc)
+                       VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (shop_owner_id, "", "", "", "", "", "", "", "", ""))
         conn.commit()
     conn.close()
 
@@ -674,17 +696,6 @@ def seller_set_plan(seller_id: int, plan: str):
     conn = db(); cur = conn.cursor()
     cur.execute("UPDATE sellers SET plan=? WHERE seller_id=?", (plan, seller_id))
     conn.commit(); conn.close()
-
-def seller_trial_used(seller_id: int) -> bool:
-    r = seller_row(seller_id)
-    return bool(int(r["trial_used"] or 0)) if r else False
-
-def seller_set_trial_used(seller_id: int):
-    ensure_seller(seller_id)
-    conn = db(); cur = conn.cursor()
-    cur.execute("UPDATE sellers SET trial_used=1 WHERE seller_id=?", (seller_id,))
-    conn.commit(); conn.close()
-
 
 def seller_days_left(seller_id: int) -> int:
     if is_super(seller_id):
@@ -1735,10 +1746,10 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         uid = update.effective_user.id
         ensure_seller(uid)
 
-        # Block banned/restricted users from buying/activating plans
+        # If user is banned/restricted from Main Shop, block connect & plans
         if is_banned_user(SUPER_ADMIN_ID, uid):
             await update.callback_query.message.reply_text(
-                "❌ You are banned/restricted from Main Shop.",
+                "❌ You are restricted from Main Shop.",
                 reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]])
             )
             return
@@ -1746,94 +1757,92 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         sr = seller_row(uid)
         if sr and (int(sr["banned_shop"] or 0) == 1 or int(sr["restricted_until"] or 0) > ts()):
             await update.callback_query.message.reply_text(
-                "❌ Your seller shop is banned/restricted. You can't activate/renew plans.",
+                "❌ Your seller account is restricted/banned.",
                 reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]])
             )
             return
 
         s = get_shop_settings(SUPER_ADMIN_ID)
         desc = (s["connect_desc"] or "").strip()
-
         bal = get_balance(SUPER_ADMIN_ID, uid)
         cur_plan = seller_plan(uid)
         days_left = seller_days_left(uid)
 
-        txt_msg = (
+        free_title = (s["connect_free_title"] or "🆓 Free to Use").strip()
+        free_desc  = (s["connect_free_desc"] or "Use the panel for free with branding enabled.").strip()
+        prem_title = (s["connect_premium_title"] or f"💎 Premium — {money(PLAN_A_PRICE)} {esc(CURRENCY)} / {PLAN_DAYS} days").strip()
+        prem_desc  = (s["connect_premium_desc"] or "Remove branding and run White-Label.").strip()
+
+        txt = (
             f"{desc}\n\n"
             f"Your Main Shop balance: <b>{money(bal)} {esc(CURRENCY)}</b>\n"
             f"Your plan: <b>{esc(cur_plan)}</b>\n"
-            f"Days left: <b>{days_left}</b>"
+            f"Days left: <b>{days_left}</b>\n\n"
+            f"<b>{esc(free_title)}</b>\n{esc(free_desc)}\n\n"
+            f"<b>{esc(prem_title)}</b>\n{esc(prem_desc)}"
         )
 
-        rows = []
+        rows = [
+            [InlineKeyboardButton(free_title, callback_data="c:plan:free")],
+            [InlineKeyboardButton(prem_title, callback_data="c:plan:premium")],
+            [InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]
+        ]
+        await update.callback_query.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
 
-        # Trial: free 1 week per Telegram ID, branded (welcome branding)
-        if not seller_trial_used(uid):
-            rows.append([InlineKeyboardButton(f"🆓 Trial Plan — FREE ({TRIAL_DAYS} days)", callback_data="c:plan:t")])
 
-        # Premium: $5 / month, no branding (whitelabel)
-        rows.append([InlineKeyboardButton(f"💎 Premium Plan — {money(PREMIUM_PRICE)} {CURRENCY} / {PREMIUM_DAYS} days", callback_data="c:plan:p")])
-
-        rows.append([InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")])
-
-        await update.callback_query.message.reply_text(txt_msg, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
     async def choose_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         if bot_kind != "master":
             return
 
-        plan = update.callback_query.data.split(":")[2]  # t/p
         uid = update.effective_user.id
         ensure_seller(uid)
 
+        # Block banned/restricted users from upgrading/connecting
         if is_banned_user(SUPER_ADMIN_ID, uid):
-            await update.callback_query.message.reply_text("❌ You are banned/restricted from Main Shop.")
+            await update.callback_query.message.reply_text("❌ You are restricted from Main Shop.")
             return
         sr = seller_row(uid)
         if sr and (int(sr["banned_shop"] or 0) == 1 or int(sr["restricted_until"] or 0) > ts()):
-            await update.callback_query.message.reply_text("❌ Your seller shop is banned/restricted. You can't activate/renew plans.")
+            await update.callback_query.message.reply_text("❌ Your seller account is restricted/banned.")
             return
 
-        # Trial (free, branded) — once per Telegram ID
-        if plan == "t":
-            if seller_trial_used(uid):
-                await update.callback_query.message.reply_text("❌ Trial already used on this Telegram ID.")
-                return
+        plan = update.callback_query.data.split(":")[2]  # free / premium
+
+        if plan == "free":
+            # Free access with branding (branded plan)
             seller_set_plan(uid, "branded")
-            seller_add_days(uid, TRIAL_DAYS)
-            seller_set_trial_used(uid)
-            log_tx(SUPER_ADMIN_ID, uid, "plan", 0, f"Trial Plan ({TRIAL_DAYS}d, branded)", 1)
-
+            # keep it effectively active for a long time
+            seller_add_days(uid, 3650)  # ~10 years
+            log_tx(SUPER_ADMIN_ID, uid, "plan", 0, "Free to Use (Branded)", 1)
             set_state(context, "await_token", {"seller_id": uid})
             await update.callback_query.message.reply_text(
-                f"✅ Trial activated: <b>Branded</b> ({TRIAL_DAYS} days)\nNow send your <b>BotFather token</b>.",
+                "✅ Free to Use activated (branding enabled).\nNow send your <b>BotFather token</b>.",
                 parse_mode=ParseMode.HTML,
                 reply_markup=kb([[InlineKeyboardButton("❌ Cancel", callback_data="m:menu")]])
             )
             return
 
-        # Premium (paid, no branding -> whitelabel)
-        if plan == "p":
-            price = float(PREMIUM_PRICE)
-            bal = get_balance(SUPER_ADMIN_ID, uid)
-            if bal < price:
-                await update.callback_query.message.reply_text("❌ Not enough Main Shop balance. Deposit first.")
-                return
-
-            set_balance(SUPER_ADMIN_ID, uid, bal - price)
-            seller_set_plan(uid, "whitelabel")
-            seller_add_days(uid, PREMIUM_DAYS)
-            log_tx(SUPER_ADMIN_ID, uid, "plan", -price, "Premium Plan (whitelabel)", 1)
-
-            set_state(context, "await_token", {"seller_id": uid})
-            await update.callback_query.message.reply_text(
-                f"✅ Premium activated: <b>White-Label</b> ({PREMIUM_DAYS} days)\nNow send your <b>BotFather token</b>.",
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb([[InlineKeyboardButton("❌ Cancel", callback_data="m:menu")]])
-            )
+        # Premium (paid) -> White-label
+        price = float(PLAN_A_PRICE)
+        bal = get_balance(SUPER_ADMIN_ID, uid)
+        if bal < price:
+            await update.callback_query.message.reply_text("❌ Not enough Main Shop balance. Deposit first.")
             return
 
-        await update.callback_query.message.reply_text("Unknown plan.")
+        set_balance(SUPER_ADMIN_ID, uid, bal - price)
+        seller_set_plan(uid, "whitelabel")
+        seller_add_days(uid, PLAN_DAYS)
+        log_tx(SUPER_ADMIN_ID, uid, "plan", -price, "Premium (White-Label)", 1)
+
+        set_state(context, "await_token", {"seller_id": uid})
+        await update.callback_query.message.reply_text(
+            f"✅ Premium activated: <b>White-Label</b>\nPaid: <b>{money(price)} {esc(CURRENCY)}</b>\nNow send your <b>BotFather token</b>.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("❌ Cancel", callback_data="m:menu")]])
+        )
+
+
     async def token_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state, data = get_state(context)
         if state != "await_token" or bot_kind != "master":
@@ -1964,7 +1973,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             InlineKeyboardButton("👥 Users List", callback_data=f"a:users:{sid}"),
             InlineKeyboardButton("📢 Broadcast", callback_data=f"a:bcast:{sid}"),
             InlineKeyboardButton("🖼 Edit Welcome", callback_data=f"a:welcome:{sid}"),
-            InlineKeyboardButton("🤖 Edit Connect My Bot", callback_data=f"a:connectdesc:{sid}"),
             InlineKeyboardButton("💳 Deposit Methods", callback_data=f"a:pm:{sid}"),
 InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}"),
             InlineKeyboardButton("⬅️ Menu", callback_data="m:menu"),
@@ -2280,18 +2288,6 @@ InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}"),
         set_state(context, "edit_welcome", {"shop_id": sid})
         await update.callback_query.message.reply_text("Send welcome TEXT, or PHOTO/VIDEO with caption.", reply_markup=admin_panel_kb(sid))
     # ---- Manage Catalog (FULL) ----
-    async def edit_connect_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        await update.callback_query.answer()
-        sid = int(update.callback_query.data.split(":")[2])
-        if not is_super(update.effective_user.id):
-            await update.callback_query.message.reply_text("❌ Not allowed.")
-            return
-        set_state(context, "edit_connect_desc", {"shop_id": sid})
-        await update.callback_query.message.reply_text(
-            "Send new description for <b>Connect My Bot</b>:",
-            parse_mode=ParseMode.HTML,
-            reply_markup=admin_panel_kb(sid)
-        )
     async def manage_root(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         sid = int(update.callback_query.data.split(":")[2])
@@ -2387,14 +2383,56 @@ InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}"),
     # Super Admin area
     async def super_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
-        if not is_super(update.effective_user.id):
-            await update.callback_query.message.reply_text("❌ Not allowed.")
-            return
+        txt = (
+            "👑 <b>Super Admin Panel</b>\n\n"
+            "• Edit Connect My Bot text/buttons\n"
+            "• Manage sellers and deposits\n"
+        )
         rows = [
-            [InlineKeyboardButton("👥 Sellers List", callback_data="sa:sellers")],
+            [InlineKeyboardButton("✏️ Edit Button/Desc", callback_data="sa:editui")],
+            [InlineKeyboardButton("🧾 Sellers List", callback_data="sa:sellers")],
             [InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]
         ]
-        await update.callback_query.message.reply_text("👑 <b>Super Admin</b>", parse_mode=ParseMode.HTML, reply_markup=kb(rows))
+        await update.callback_query.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
+    async def sa_editui(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
+        s = get_shop_settings(SUPER_ADMIN_ID)
+
+        def cur(k: str) -> str:
+            return (s.get(k) or "").strip() or "(empty)"
+
+        fields = [
+            ("connect_desc", "Connect My Bot — Description"),
+            ("connect_free_title", "Free to Use — Button Text"),
+            ("connect_free_desc", "Free to Use — Description"),
+            ("connect_premium_title", "Premium — Button Text"),
+            ("connect_premium_desc", "Premium — Description"),
+        ]
+
+        lines = ["✏️ <b>Edit Button/Desc</b>\n"]
+        for k, label in fields:
+            val = cur(k)
+            # show only first 60 chars
+            short = val if len(val) <= 60 else val[:60] + "…"
+            lines.append(f"<b>{esc(label)}</b>\n<code>{esc(short)}</code>\n")
+
+        rows = [[InlineKeyboardButton(label, callback_data=f"sa:editui:pick:{k}")] for k, label in fields]
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data="sa:home")])
+
+        await update.callback_query.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=kb(rows))
+
+    async def sa_editui_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
+        parts = update.callback_query.data.split(":")
+        field = parts[3]
+        set_state(context, "sa_editui", {"field": field})
+        await update.callback_query.message.reply_text(
+            "Send the new text now.\n\n"
+            "Tip: you can use emojis and new lines.",
+            reply_markup=kb([[InlineKeyboardButton("❌ Cancel", callback_data="sa:home")]])
+        )
+
+
 
     async def super_sellers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
@@ -2517,6 +2555,17 @@ InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}"),
             await admin_reply_text(update, context); return
 
         # token
+        if state == "sa_editui":
+            field = data.get("field")
+            txt = (update.message.text or update.message.caption or "").strip()
+            if not txt:
+                await update.message.reply_text("Send text (cannot be empty).")
+                return
+            set_shop_setting(SUPER_ADMIN_ID, field, txt)
+            clear_state(context)
+            await update.message.reply_text("✅ Updated.", reply_markup=kb([[InlineKeyboardButton("⬅️ Super Admin", callback_data="sa:home")]]))
+            return
+
         if state == "await_token":
             await token_text(update, context); return
 
@@ -2534,7 +2583,6 @@ InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}"),
 
         # edit welcome
         if state == "edit_welcome":
-
             sid = int(data["shop_id"])
             msg = update.message
             if msg.photo:
@@ -2551,15 +2599,6 @@ InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}"),
                 set_shop_setting(sid, "welcome_text", msg.text or "")
             clear_state(context)
             await msg.reply_text("✅ Welcome updated.", reply_markup=admin_panel_kb(sid))
-            return
-
-
-        # edit connect description
-        if state == "edit_connect_desc":
-            sid = int(data["shop_id"])
-            set_shop_setting(sid, "connect_desc", msg.text or "")
-            clear_state(context)
-            await msg.reply_text("✅ Connect My Bot description updated.", reply_markup=admin_panel_kb(sid))
             return
 
         # payment methods add/edit
@@ -3056,6 +3095,12 @@ InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}"),
             await super_search(update, context); return
         if data.startswith("sa:sel:"):
             await super_seller_open(update, context); return
+        if data == "sa:home":
+            await super_open(update, context); return
+        if data == "sa:editui":
+            await sa_editui(update, context); return
+        if data.startswith("sa:editui:pick:"):
+            await sa_editui_pick(update, context); return
         if data.startswith("sa:"):
             await super_action(update, context); return
 
