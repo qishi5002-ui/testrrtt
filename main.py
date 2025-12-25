@@ -63,10 +63,8 @@ PLAN_B_PRICE = float((os.getenv("PLAN_B_PRICE") or "10").strip() or "10")   # $1
 PLAN_DAYS = int((os.getenv("PLAN_DAYS") or "30").strip() or "30")
 MASTER_BOT_USERNAME = (os.getenv("MASTER_BOT_USERNAME") or "").strip().lstrip("@")
 
-# -------- Branding (ENV) --------
-BRAND_CREATED_BY = os.getenv("BRAND_CREATED_BY", "Bot created by @RekkoOwn")
-BRAND_GROUP = os.getenv("BRAND_GROUP", "Group : @AutoPanels")
-
+BRAND_CREATED_BY = (os.getenv("BRAND_CREATED_BY") or "Bot created by @RekkoOwn").strip()
+BRAND_GROUP = (os.getenv("BRAND_GROUP") or "Group : @AutoPanels").strip()
 BRAND_LINE = f"{BRAND_CREATED_BY}\n{BRAND_GROUP}"
 
 if not BOT_TOKEN:
@@ -888,8 +886,9 @@ def render_welcome_text(shop_owner_id: int) -> str:
         # Always ensure the 2-line branding footer is present
         return (cleaned + "\n\n" + BRAND_LINE).strip()
 
-    # Master shop: do not force branding (keep whatever you set)
-    return _strip_branding(base)
+    # Master shop: show branding too (welcome only)
+    cleaned = _strip_branding(base)
+    return (cleaned + "\n\n" + BRAND_LINE).strip() if cleaned else BRAND_LINE
 
 
 # ---------------- MENUS ----------------
@@ -1077,6 +1076,19 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             await update.callback_query.message.reply_text("❌ You are restricted from this shop.")
             return
         cat_id = int(update.callback_query.data.split(":")[2])
+
+        c = cat_get(sid, cat_id)
+        if c:
+            c_desc = (c["description"] or "").strip()
+            c_file_id = (c["file_id"] or "").strip()
+            c_ftype = (c["file_type"] or "").strip()
+            c_caption = f"📁 <b>{esc(c['name'])}</b>" + (f"\n\n{esc(c_desc)}" if c_desc else "")
+            if c_file_id and c_ftype == "photo":
+                await update.callback_query.message.reply_photo(photo=c_file_id, caption=c_caption, parse_mode=ParseMode.HTML)
+            elif c_file_id and c_ftype == "video":
+                await update.callback_query.message.reply_video(video=c_file_id, caption=c_caption, parse_mode=ParseMode.HTML)
+            elif c_desc:
+                await update.callback_query.message.reply_text(c_caption, parse_mode=ParseMode.HTML)
         subs = cocat_list(sid, cat_id)
         if not subs:
             await update.callback_query.message.reply_text("No sub-categories yet.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data="m:products")],[InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]]))
@@ -1094,6 +1106,19 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return
         _, _, cat_s, sub_s = update.callback_query.data.split(":")
         cat_id = int(cat_s); sub_id = int(sub_s)
+
+        sc = cocat_get(sid, sub_id)
+        if sc:
+            sc_desc = (sc["description"] or "").strip()
+            sc_file_id = (sc["file_id"] or "").strip()
+            sc_ftype = (sc["file_type"] or "").strip()
+            sc_caption = f"📂 <b>{esc(sc['name'])}</b>" + (f"\n\n{esc(sc_desc)}" if sc_desc else "")
+            if sc_file_id and sc_ftype == "photo":
+                await update.callback_query.message.reply_photo(photo=sc_file_id, caption=sc_caption, parse_mode=ParseMode.HTML)
+            elif sc_file_id and sc_ftype == "video":
+                await update.callback_query.message.reply_video(video=sc_file_id, caption=sc_caption, parse_mode=ParseMode.HTML)
+            elif sc_desc:
+                await update.callback_query.message.reply_text(sc_caption, parse_mode=ParseMode.HTML)
         prods = prod_list(sid, cat_id, sub_id)
         if not prods:
             await update.callback_query.message.reply_text("No products yet.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"p:cat:{cat_id}")],[InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]]))
@@ -2192,6 +2217,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         rows = [
             [InlineKeyboardButton("➕ Add Sub-Category", callback_data=f"mg:addsub:{sid}:{cat_id}")],
             [InlineKeyboardButton("✏️ Edit Category", callback_data=f"mg:editcat:{sid}:{cat_id}")],
+            [InlineKeyboardButton("🖼 Set Category Media", callback_data=f"mg:catmedia:{sid}:{cat_id}")],
             [InlineKeyboardButton("🗑 Delete Category", callback_data=f"mg:delcat:{sid}:{cat_id}")],
         ]
         for sc in subs[:30]:
@@ -2218,6 +2244,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         rows = [
             [InlineKeyboardButton("➕ Add Product", callback_data=f"mg:addprod:{sid}:{cat_id}:{sub_id}")],
             [InlineKeyboardButton("✏️ Edit Sub-Category", callback_data=f"mg:editsub:{sid}:{sub_id}:{cat_id}")],
+            [InlineKeyboardButton("🖼 Set Sub-Category Media", callback_data=f"mg:submedia:{sid}:{sub_id}:{cat_id}")],
             [InlineKeyboardButton("🗑 Delete Sub-Category", callback_data=f"mg:delsub:{sid}:{sub_id}:{cat_id}")],
         ]
         for p in prods[:30]:
@@ -2506,7 +2533,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             if not q:
                 await update.message.reply_text("❌ Empty."); return
             conn = db(); cur = conn.cursor()
-            cur.execute("SELECT order_id FROM orders WHERE shop_owner_id=? AND order_id LIKE ? ORDER BY created_at DESC LIMIT 40", (sid, f"%{q}%"))
+            cur.execute("SELECT order_id FROM orders WHERE shop_owner_id=? AND UPPER(order_id) LIKE ? ORDER BY created_at DESC LIMIT 40", (sid, f"%{q.upper()}%"))
             ids = [r["order_id"] for r in cur.fetchall()]
             conn.close()
             if not ids:
@@ -2625,6 +2652,41 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             conn.commit(); conn.close()
             clear_state(context)
             await update.message.reply_text("✅ Link updated.", reply_markup=kb([[InlineKeyboardButton("Back", callback_data=f"mg:prod:{sid}:{pid}")]]))
+            return
+
+
+        if state == "mg_cat_media":
+            sid = int(data["shop_id"]); cat_id = int(data["cat_id"])
+            msg = update.message
+            file_id = ""; ftype = ""
+            if msg.photo:
+                file_id = msg.photo[-1].file_id; ftype = "photo"
+            elif msg.video:
+                file_id = msg.video.file_id; ftype = "video"
+            else:
+                await update.message.reply_text("Send a PHOTO or VIDEO."); return
+            conn = db(); cur = conn.cursor()
+            cur.execute("UPDATE categories SET file_id=?, file_type=? WHERE shop_owner_id=? AND id=?", (file_id, ftype, sid, cat_id))
+            conn.commit(); conn.close()
+            clear_state(context)
+            await update.message.reply_text("✅ Category media set.", reply_markup=kb([[InlineKeyboardButton("Back", callback_data=f"mg:cat:{sid}:{cat_id}")]]))
+            return
+
+        if state == "mg_sub_media":
+            sid = int(data["shop_id"]); sub_id = int(data["sub_id"]); cat_id = int(data["cat_id"])
+            msg = update.message
+            file_id = ""; ftype = ""
+            if msg.photo:
+                file_id = msg.photo[-1].file_id; ftype = "photo"
+            elif msg.video:
+                file_id = msg.video.file_id; ftype = "video"
+            else:
+                await update.message.reply_text("Send a PHOTO or VIDEO."); return
+            conn = db(); cur = conn.cursor()
+            cur.execute("UPDATE cocategories SET file_id=?, file_type=? WHERE shop_owner_id=? AND id=?", (file_id, ftype, sid, sub_id))
+            conn.commit(); conn.close()
+            clear_state(context)
+            await update.message.reply_text("✅ Sub-category media set.", reply_markup=kb([[InlineKeyboardButton("Back", callback_data=f"mg:cat:{sid}:{cat_id}")]]))
             return
 
         if state == "mg_edit_media":
@@ -2840,6 +2902,21 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             conn.commit(); conn.close()
             await q.message.reply_text("✅ Product deleted.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:sub:{sid}:{p['category_id']}:{p['cocategory_id']}")]])); return
 
+
+        # category/subcategory media set
+        if data.startswith("mg:catmedia:"):
+            await q.answer()
+            _, _, sid_s, cat_s = data.split(":")
+            set_state(context, "mg_cat_media", {"shop_id": int(sid_s), "cat_id": int(cat_s)})
+            await q.message.reply_text("Send PHOTO or VIDEO for this category (caption ignored):")
+            return
+
+        if data.startswith("mg:submedia:"):
+            await q.answer()
+            _, _, sid_s, sub_s, cat_s = data.split(":")
+            set_state(context, "mg_sub_media", {"shop_id": int(sid_s), "sub_id": int(sub_s), "cat_id": int(cat_s)})
+            await q.message.reply_text("Send PHOTO or VIDEO for this sub-category (caption ignored):")
+            return
         # category edit/delete
         if data.startswith("mg:editcat:"):
             await q.answer()
