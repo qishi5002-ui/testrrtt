@@ -1108,10 +1108,10 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         await update.callback_query.message.reply_text("✅ Quantity updated.", reply_markup=kb([[InlineKeyboardButton("🔄 Refresh", callback_data=f"p:prod:{pid}")]]))
 
     async def product_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
         await update.callback_query.answer()
         sid = current_shop_id()
         uid = update.effective_user.id
+
         if is_banned_user(sid, uid):
             await update.callback_query.message.reply_text("❌ You are restricted from this shop.")
             return
@@ -1140,47 +1140,98 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             )
             return
 
-        set_balance(sid, uid, bal - total)
-        keys = pop_keys(sid, pid, uid, qty)
-
-        order_id = ''
-        try:
-            order_id = create_order(sid, uid, pid, p["name"], qty, total, keys)
-        except Exception:
-            # If orders table is missing or any DB error happens, still deliver to user.
-            order_id = gen_order_id(10)
-        try:
-            log_tx(sid, uid, "purchase", -total, f"{p['name']} | {order_id}", qty)
-        except Exception:
-            pass
-
+        # We make delivery extremely robust:
+        # - deduct balance
+        # - pop keys
+        # - always send something to the user (even if DB insert fails)
+        # - if any unexpected error occurs, we refund and alert super admin
+        order_id = gen_order_id(10)
+        keys: List[str] = []
         link = (p["tg_link"] or "").strip()
 
-        msg = (
-            f"✅ <b>Purchase Successful</b>\n\n"
-            f"Order ID: <b>{esc(order_id)}</b>\n"
-            f"Product: <b>{esc(p['name'])}</b>\n"
-            f"Qty: <b>{qty}</b>\n"
-            f"Paid: <b>{money(total)} {esc(CURRENCY)}</b>\n\n"
-            f"<b>Key(s):</b>\n"
-            + ("\n".join([f"<code>{esc(k)}</code>" for k in (keys or [])]) or "<i>No key delivered.</i>")
-        )
-
-        rows = []
-        if link:
-            rows.append([InlineKeyboardButton("📦 Get File", callback_data=f"p:file:{pid}")])
-        rows.append([InlineKeyboardButton("🏠 Menu", callback_data="m:menu")])
-
-        await update.callback_query.message.reply_text(msg, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
-
         try:
-            keys_block = "\n".join(keys) if keys else "-"
-            await context.bot.send_message(
-                SUPER_ADMIN_ID,
-                f"🔔 Order\nOrder ID: {order_id}\nShop: {user_display(shop_owner_id) if bot_kind=='seller' else 'Main'}\nUser: {user_display(uid)}\nProduct: {p['name']}\nQty: {qty}\nTotal: {money(total)} {CURRENCY}\n\nKeys:\n{keys_block}",
+            set_balance(sid, uid, bal - total)
+            keys = pop_keys(sid, pid, uid, qty)
+
+            try:
+                order_id = create_order(sid, uid, pid, p["name"], qty, total, keys)
+            except Exception:
+                # Still proceed with a generated order_id if orders DB insert fails
+                order_id = order_id or gen_order_id(10)
+
+            try:
+                log_tx(sid, uid, "purchase", -total, f"{p['name']} | {order_id}", qty)
+            except Exception:
+                pass
+
+            msg = (
+                f"✅ <b>Purchase Successful</b>\n\n"
+                f"Order ID: <b>{esc(order_id)}</b>\n"
+                f"Product: <b>{esc(p['name'])}</b>\n"
+                f"Qty: <b>{qty}</b>\n"
+                f"Paid: <b>{money(total)} {esc(CURRENCY)}</b>\n\n"
+                f"<b>Key(s):</b>\n"
+                + ("\n".join([f"<code>{esc(k)}</code>" for k in (keys or [])]) or "<i>No key delivered.</i>")
             )
-        except Exception:
-            pass
+
+            rows = []
+            if link:
+                rows.append([InlineKeyboardButton("📦 Get File", callback_data=f"p:file:{pid}")])
+            rows.append([InlineKeyboardButton("🏠 Menu", callback_data="m:menu")])
+
+            await update.callback_query.message.reply_text(
+                msg, parse_mode=ParseMode.HTML, reply_markup=kb(rows)
+            )
+
+            # Notify admins (always include order_id and keys)
+            try:
+                keys_block = "\n".join(keys) if keys else "-"
+                shop_label = STORE_NAME if sid == SUPER_ADMIN_ID else user_display(sid)
+                await context.bot.send_message(
+                    SUPER_ADMIN_ID,
+                    f"🔔 Order\n"
+                    f"Order ID: {order_id}\n"
+                    f"Shop: {shop_label}\n"
+                    f"User: {user_display(uid)}\n"
+                    f"Product: {p['name']}\n"
+                    f"Qty: {qty}\n"
+                    f"Total: {money(total)} {CURRENCY}\n\n"
+                    f"Keys:\n{keys_block}"
+                )
+                if bot_kind == "seller":
+                    try:
+                        await context.bot.send_message(
+                            shop_owner_id,
+                            f"🔔 New purchase\n"
+                            f"Order ID: {order_id}\n"
+                            f"User: {user_display(uid)}\n"
+                            f"Product: {p['name']}\n"
+                            f"Qty: {qty}\n"
+                            f"Total: {money(total)} {CURRENCY}"
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        except Exception as e:
+            log.exception("purchase failed")
+            # refund (best-effort)
+            try:
+                set_balance(sid, uid, bal)
+            except Exception:
+                pass
+            try:
+                await update.callback_query.message.reply_text(
+                    "❌ Purchase failed (internal error). Your balance was restored. Please try again."
+                )
+            except Exception:
+                pass
+            try:
+                await context.bot.send_message(SUPER_ADMIN_ID, f"❌ Purchase error for {uid}: {e}")
+            except Exception:
+                pass
+
     async def _extract_channel_username(link: str) -> Optional[str]:
         link = (link or "").strip()
         if not link:
