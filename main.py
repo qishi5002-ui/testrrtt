@@ -63,7 +63,10 @@ PLAN_B_PRICE = float((os.getenv("PLAN_B_PRICE") or "10").strip() or "10")   # $1
 PLAN_DAYS = int((os.getenv("PLAN_DAYS") or "30").strip() or "30")
 MASTER_BOT_USERNAME = (os.getenv("MASTER_BOT_USERNAME") or "").strip().lstrip("@")
 
-BRAND_LINE = "Bot created by @RekkoOwn\nGroup : @AutoPanels"
+BRAND_CREATED_BY = (os.getenv("BRAND_CREATED_BY") or "Bot created by @RekkoOwn").strip()
+BRAND_GROUP = (os.getenv("BRAND_GROUP") or "Group : @AutoPanels").strip()
+BRAND_LINE = (BRAND_CREATED_BY + "
+" + BRAND_GROUP).strip()
 
 if not BOT_TOKEN:
     raise RuntimeError("Missing BOT_TOKEN")
@@ -2434,7 +2437,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
                 txt = ""
             pm_add(sid, data.get("name","Method"), txt)
             clear_state(context)
-            await update.message.reply_text("✅ Added payment method.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"a:wallet:{sid}")]]))
+            await update.message.reply_text("✅ Added payment method.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"a:pm:{sid}")]]))
             return
 
         if state == "pm_edit":
@@ -2447,7 +2450,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             if r and int(r["shop_owner_id"]) == sid:
                 pm_update(pmid, r["name"], txt)
             clear_state(context)
-            await update.message.reply_text("✅ Updated.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"a:wallet:{sid}")]]))
+            await update.message.reply_text("✅ Updated.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"a:pm:{sid}")]]))
             return
 
 
