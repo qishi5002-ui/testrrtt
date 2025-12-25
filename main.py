@@ -63,9 +63,7 @@ PLAN_B_PRICE = float((os.getenv("PLAN_B_PRICE") or "10").strip() or "10")   # $1
 PLAN_DAYS = int((os.getenv("PLAN_DAYS") or "30").strip() or "30")
 MASTER_BOT_USERNAME = (os.getenv("MASTER_BOT_USERNAME") or "").strip().lstrip("@")
 
-BRAND_LINE = "Bot created by @RekkoOwn
-Group : @AutoPanels
-Group : @AutoPanels"
+BRAND_LINE = "Bot created by @RekkoOwn\nGroup : @AutoPanels"
 
 if not BOT_TOKEN:
     raise RuntimeError("Missing BOT_TOKEN")
@@ -373,8 +371,7 @@ def init_db():
     s = get_shop_settings(SUPER_ADMIN_ID)
     if not (s["welcome_text"] or "").strip():
         set_shop_setting(SUPER_ADMIN_ID, "welcome_text",
-            f"✅ Welcome to <b>{esc(STORE_NAME)}</b>\nGet your 24/7 Store Panel Here !!\n\nBot created by @RekkoOwn
-Group : @AutoPanels"
+            f"✅ Welcome to <b>{esc(STORE_NAME)}</b>\nGet your 24/7 Store Panel Here !!\n\nBot created by @RekkoOwn\nGroup : @AutoPanels"
         )
     if not (s["connect_desc"] or "").strip():
         set_shop_setting(SUPER_ADMIN_ID, "connect_desc",
@@ -1195,17 +1192,11 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         set_balance(sid, uid, bal - total)
         keys = pop_keys(sid, pid, uid, qty)
 
-        order_id = ''
-        try:
-            order_id = ""
+        order_id = gen_order_id(10)
         try:
             order_id = create_order(sid, uid, pid, p["name"], qty, total, keys)
         except Exception:
-            order_id = gen_order_id(10)
-        except Exception:
-            # If orders table is missing or any DB error happens, still deliver to user.
-            order_id = gen_order_id(10)
-        try:
+            pass
             log_tx(sid, uid, "purchase", -total, f"{p['name']} | {order_id}", qty)
         except Exception:
             pass
