@@ -2232,16 +2232,35 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         )
 
     async def show_extend_master(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int):
+        """Extend subscription from Main Shop (Master bot deep-link /start extend)."""
         ensure_seller(uid)
-        cur_plan = seller_plan(uid)
+
+        # Block renewal if seller is banned/restricted from using the system
+        r = seller_row(uid)
+        if r and (int(r["banned_shop"] or 0) == 1 or int(r["restricted_until"] or 0) > ts()):
+            await update.effective_chat.send_message(
+                "❌ You are not allowed to renew at the moment.",
+                reply_markup=kb([[InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]])
+            )
+            return
+
         days_left = seller_days_left(uid)
         bal = get_balance(SUPER_ADMIN_ID, uid)
-        txt = f"⏳ <b>Extend Subscription</b>\n\nDays left: <b>{days_left}</b>\nCurrent plan: <b>{esc(cur_plan)}</b>\nMain Shop balance: <b>{money(bal)} {esc(CURRENCY)}</b>\n\nChoose:"
-        rows = []
-        if cur_plan != "whitelabel":
-            rows.append([InlineKeyboardButton(f"Pay {money(PLAN_A_PRICE)} {CURRENCY} ()", callback_data="e:plan:a")])
-        rows.append([InlineKeyboardButton(f"Pay {money(PLAN_B_PRICE)} {CURRENCY} ()", callback_data="e:plan:b")])
-        rows.append([InlineKeyboardButton("🏠 Menu", callback_data="m:menu")])
+
+        price = 5.0
+        txt = (
+            f"⏳ <b>Extend Subscription</b>\n\n"
+            f"Current days left: <b>{days_left}</b>\n"
+            f"Main Shop balance: <b>{money(bal)} {esc(CURRENCY)}</b>\n\n"
+            f"Renewal: <b>{money(price)} {esc(CURRENCY)}</b> / <b>30 Days</b>\n"
+            f"Plan: <b>White-label</b> (No branding)\n\n"
+            f"Tap below to renew:"
+        )
+
+        rows = [
+            [InlineKeyboardButton(f"💳 Pay {money(price)} {CURRENCY} — 30 Days (White-label)", callback_data="e:renew")],
+            [InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]
+        ]
         await update.effective_chat.send_message(txt, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
 
     async def extend_choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2249,42 +2268,37 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         if bot_kind != "master":
             return
         uid = update.effective_user.id
-        plan = update.callback_query.data.split(":")[2]
         ensure_seller(uid)
 
-        # Block banned/restricted users from renewing subscription
-        if is_banned_user(SUPER_ADMIN_ID, uid):
-            await update.callback_query.message.reply_text("❌ You are banned/restricted from Main Shop.")
-            return
-        sr = seller_row(uid)
-        if sr and (int(sr["banned_shop"] or 0) == 1 or int(sr["restricted_until"] or 0) > ts()):
-            await update.callback_query.message.reply_text("❌ Your seller shop is banned/restricted. You cannot renew subscription.")
-            return
-        cur_plan = seller_plan(uid)
-        if cur_plan == "whitelabel" and plan == "a":
-            await update.callback_query.message.reply_text("❌ White-Label cannot pay $5. Choose .")
+        # Support legacy callback_data (e:plan:*) but the UI now exposes only one option.
+        if not (update.callback_query.data == "e:renew" or update.callback_query.data.startswith("e:plan:")):
             return
 
-        price = PLAN_A_PRICE if plan == "a" else PLAN_B_PRICE
+        r = seller_row(uid)
+        if r and (int(r["banned_shop"] or 0) == 1 or int(r["restricted_until"] or 0) > ts()):
+            await update.callback_query.message.reply_text("❌ You are not allowed to renew at the moment.")
+            return
+
+        price = 5.0
         bal = get_balance(SUPER_ADMIN_ID, uid)
         if bal < price:
             await update.callback_query.message.reply_text("❌ Not enough balance. Deposit first.")
             return
 
+        # Deduct from Main Shop balance
         set_balance(SUPER_ADMIN_ID, uid, bal - price)
 
-        if plan == "b":
-            seller_set_plan(uid, "whitelabel")
-            note = "White-Label"
-        else:
-            seller_set_plan(uid, "whitelabel")
-            note = "White-Label (upgrade via $5)"
+        # Always renew as White-label (no branding), 30 days
+        seller_set_plan(uid, "whitelabel")
+        seller_add_days(uid, 30)
+        log_tx(SUPER_ADMIN_ID, uid, "plan", -price, "White-Label", 1)
 
-        seller_add_days(uid, PLAN_DAYS)
-        log_tx(SUPER_ADMIN_ID, uid, "plan", -price, note, 1)
+        await update.callback_query.message.reply_text(
+            f"✅ Renewed.\nPlan: White-Label\nDays left: {seller_days_left(uid)}",
+            reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]])
+        )
 
-        await update.callback_query.message.reply_text(f"✅ Renewed.\nPlan: {note}\nDays left: {seller_days_left(uid)}", reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]]))
-
+        # Restart seller bot if connected & active
         sb = get_seller_bot(uid)
         if sb and int(sb["enabled"] or 0) == 1 and seller_active(uid):
             try:
@@ -3382,7 +3396,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         # extend
         if data == "m:extend":
             await extend_in_seller(update, context); return
-        if data.startswith("e:plan:"):
+        if data == "e:renew" or data.startswith("e:plan:"):
             await extend_choose(update, context); return
 
         # admin panel
