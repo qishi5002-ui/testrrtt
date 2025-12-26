@@ -17,7 +17,7 @@
 # =========================
 # IMPORTANT RULES IMPLEMENTED
 # =========================
-# - Master shop users see: Products / Wallet / History / Support / Connect My Bot
+# - Master shop users see: Products / Wallet / History / Support / Connect Bot
 # - Seller bot users see ONLY seller shop: Products / Wallet / History / Support
 # - Seller owner (and Super Admin) in seller bot sees: Admin Panel + Extend Subscription
 # - Admin Panel (master: super admin only) (seller: owner + super admin unless panel banned)
@@ -223,7 +223,7 @@ TRANSLATIONS = {'ar': {'ask_order_id': 'أرسل رقم الطلب:',
         'btn_lang': '🌐 Sprache',
         'btn_products': '🛒 Produkte',
         'btn_super': '👑 Super-Admin',
-        'btn_support': '🆘 Support / Feedback',
+        'btn_support': '🆘 Chat Admin',
         'btn_wallet': '💰 Wallet',
         'lang_saved': '✅ Sprache gespeichert.',
         'lang_title': 'Sprache wählen:',
@@ -231,13 +231,13 @@ TRANSLATIONS = {'ar': {'ask_order_id': 'أرسل رقم الطلب:',
         'order_found': '✅ Bestellung gefunden:'},
  'en': {'ask_order_id': 'Send Order ID (example: ABC12345):',
         'btn_admin': '🛠 Admin Panel',
-        'btn_connect': '🤖 Connect My Bot',
+        'btn_connect': '🤖 Connect Bot',
         'btn_extend': '⏳ Extend Subscription',
         'btn_history': '📜 History',
         'btn_lang': '🌐 Language',
         'btn_products': '🛒 Products',
         'btn_super': '👑 Super Admin',
-        'btn_support': '🆘 Support / Feedback',
+        'btn_support': '🆘 Chat Admin',
         'btn_wallet': '💰 Wallet',
         'lang_saved': '✅ Language saved.',
         'lang_title': '🌐 <b>Choose Language</b>',
@@ -672,7 +672,7 @@ def init_db():
         welcome_file_id TEXT DEFAULT '',
         welcome_file_type TEXT DEFAULT '', -- photo/video
 
-        -- Connect My Bot UI (editable by Super Admin)
+        -- Connect Bot UI (editable by Super Admin)
         connect_desc TEXT DEFAULT '',
         connect_free_title TEXT DEFAULT '',
         connect_free_desc TEXT DEFAULT '',
@@ -870,7 +870,7 @@ def init_db():
         )
     if not (s["connect_desc"] or "").strip():
         set_shop_setting(SUPER_ADMIN_ID, "connect_desc",
-            "🤖 <b>Connect My Bot</b>\n\n"
+            "🤖 <b>Connect Bot</b>\n\n"
             "Create your own bot at @BotFather, then connect your token here.\n"
             "Choose Free to Use (with branding) or Premium (no branding).\n"
         )
@@ -1226,24 +1226,6 @@ def clear_keys(shop_owner_id: int, pid: int):
     cur.execute("DELETE FROM product_keys WHERE shop_owner_id=? AND product_id=? AND delivered_once=0", (shop_owner_id, pid))
     conn.commit(); conn.close()
 
-
-def list_product_keys(shop_owner_id: int, product_id: int, limit: int = 20, offset: int = 0) -> List[sqlite3.Row]:
-    conn = db(); cur = conn.cursor()
-    cur.execute("""SELECT * FROM product_keys
-                   WHERE shop_owner_id=? AND product_id=?
-                   ORDER BY id ASC LIMIT ? OFFSET ?""",
-                (shop_owner_id, product_id, int(limit), int(offset)))
-    rows = cur.fetchall(); conn.close()
-    return rows
-
-def count_product_keys(shop_owner_id: int, product_id: int) -> int:
-    conn = db(); cur = conn.cursor()
-    cur.execute("""SELECT COUNT(1) c FROM product_keys WHERE shop_owner_id=? AND product_id=?""",
-                (shop_owner_id, product_id))
-    r = cur.fetchone(); conn.close()
-    return int(r["c"] or 0) if r else 0
-
-
 def pop_keys(shop_owner_id: int, pid: int, uid: int, qty: int) -> List[str]:
     conn = db(); cur = conn.cursor()
     cur.execute("""SELECT id, key_line FROM product_keys
@@ -1290,6 +1272,24 @@ def dep_method_delete(shop_owner_id: int, mid: int):
     conn = db(); cur = conn.cursor()
     cur.execute("DELETE FROM deposit_methods WHERE shop_owner_id=? AND id=?", (shop_owner_id, mid))
     conn.commit(); conn.close()
+
+
+def list_product_keys(shop_owner_id: int, product_id: int, limit: int = 50, offset: int = 0) -> List[sqlite3.Row]:
+    conn = db(); cur = conn.cursor()
+    cur.execute(
+        "SELECT id, key_line, delivered_once, delivered_to, delivered_at FROM product_keys "
+        "WHERE shop_owner_id=? AND product_id=? ORDER BY id ASC LIMIT ? OFFSET ?",
+        (shop_owner_id, product_id, int(limit), int(offset))
+    )
+    rows = cur.fetchall(); conn.close()
+    return rows
+
+def count_product_keys(shop_owner_id: int, product_id: int) -> int:
+    conn = db(); cur = conn.cursor()
+    cur.execute("SELECT COUNT(1) c FROM product_keys WHERE shop_owner_id=? AND product_id=?", (shop_owner_id, product_id))
+    r = cur.fetchone(); conn.close()
+    return int(r["c"] or 0) if r else 0
+
 
 # --- support ---
 def get_open_ticket(shop_owner_id: int, user_id: int) -> Optional[int]:
@@ -2143,7 +2143,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         add_ticket_msg(tid, update.effective_user.id, text)
         await update.message.reply_text("✅ Replied.", reply_markup=kb([[InlineKeyboardButton("⬅️ Admin", callback_data="m:admin")]]))
 
-    # ---------- Connect My Bot (master only) ----------
+    # ---------- Connect Bot (master only) ----------
     async def connect_screen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         if bot_kind != "master":
@@ -2789,80 +2789,96 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         ]
         await update.callback_query.message.reply_text(f"🛒 <b>{esc(p['name'])}</b>\nStock: <b>{st}</b>", parse_mode=ParseMode.HTML, reply_markup=kb(rows))
 
+    
+    async def mg_viewkeys(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
+        parts = update.callback_query.data.split(":")
+        # mg:viewkeys:sid:pid:page
+        sid = int(parts[2]); pid = int(parts[3]); page = int(parts[4])
+        per_page = 15
+        total = count_product_keys(sid, pid)
+        offset = max(0, page) * per_page
+        rows_db = list_product_keys(sid, pid, limit=per_page, offset=offset)
 
-async def mg_viewkeys(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    parts = update.callback_query.data.split(":")
-    # mg:viewkeys:sid:pid:page
-    sid = int(parts[2]); pid = int(parts[3]); page = int(parts[4])
-    per_page = 15
-    total = count_product_keys(sid, pid)
-    offset = max(0, page) * per_page
-    rows_db = list_product_keys(sid, pid, limit=per_page, offset=offset)
+        if not rows_db:
+            await update.callback_query.message.reply_text(
+                "No keys found for this product.",
+                reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:prod:{sid}:{pid}")]])
+            )
+            return
 
-    if not rows_db:
+        lines = [f"🔑 <b>All Keys</b> (page {page+1})\n"]
+        btn_rows = []
+        for r in rows_db:
+            kid = int(r["id"])
+            key_line = (r["key_line"] or "").strip()
+            delivered = int(r["delivered_once"] or 0) == 1
+            mark = "✅ Delivered" if delivered else "🟢 Unused"
+            lines.append(f"<b>#{kid}</b> — {mark}\n<code>{esc(key_line)}</code>")
+            if not delivered:
+                btn_rows.append([InlineKeyboardButton(f"❌ Delete #{kid}", callback_data=f"mg:delkey:{sid}:{pid}:{kid}:{page}")])
+
+        nav = []
+        if offset > 0:
+            nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"mg:viewkeys:{sid}:{pid}:{page-1}"))
+        if offset + per_page < total:
+            nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"mg:viewkeys:{sid}:{pid}:{page+1}"))
+        if nav:
+            btn_rows.append(nav)
+
+        btn_rows.append([InlineKeyboardButton("🧹 Delete ALL Unused Keys", callback_data=f"mg:delallkeys:{sid}:{pid}:{page}")])
+        btn_rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"mg:prod:{sid}:{pid}")])
+
         await update.callback_query.message.reply_text(
-            "No keys found for this product.",
-            reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:prod:{sid}:{pid}")]])
+            "\n\n".join(lines),
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb(btn_rows[:90])
         )
-        return
 
-    lines = [f"🔑 <b>All Keys</b> (page {page+1})\n"]
-    btn_rows = []
-    for r in rows_db:
-        kid = int(r["id"])
-        key_line = (r["key_line"] or "").strip()
-        delivered = int(r["delivered_once"] or 0) == 1
-        mark = "✅ Delivered" if delivered else "🟢 Unused"
-        lines.append(f"<b>#{kid}</b> — {mark}\n<code>{esc(key_line)}</code>")
-        if not delivered:
-            btn_rows.append([InlineKeyboardButton(f"❌ Delete #{kid}", callback_data=f"mg:delkey:{sid}:{pid}:{kid}:{page}")])
+    async def mg_delkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
+        parts = update.callback_query.data.split(":")
+        # mg:delkey:sid:pid:kid:page
+        sid = int(parts[2]); pid = int(parts[3]); kid = int(parts[4]); page = int(parts[5])
 
-    nav = []
-    if offset > 0:
-        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"mg:viewkeys:{sid}:{pid}:{page-1}"))
-    if offset + per_page < total:
-        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"mg:viewkeys:{sid}:{pid}:{page+1}"))
-    if nav:
-        btn_rows.append(nav)
+        conn = db(); cur = conn.cursor()
+        cur.execute("SELECT delivered_once FROM product_keys WHERE shop_owner_id=? AND id=? AND product_id=?", (sid, kid, pid))
+        r = cur.fetchone()
+        if not r:
+            conn.close()
+            await update.callback_query.message.reply_text(
+                "Key not found.",
+                reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:viewkeys:{sid}:{pid}:{page}")]])
+            )
+            return
+        if int(r["delivered_once"] or 0) == 1:
+            conn.close()
+            await update.callback_query.message.reply_text(
+                "❌ Delivered keys cannot be deleted.",
+                reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:viewkeys:{sid}:{pid}:{page}")]])
+            )
+            return
 
-    btn_rows.append([InlineKeyboardButton("🗑 Delete ALL Unused Keys", callback_data=f"mg:delallkeys:{sid}:{pid}")])
-    btn_rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"mg:prod:{sid}:{pid}")])
+        cur.execute("DELETE FROM product_keys WHERE shop_owner_id=? AND id=? AND product_id=? AND delivered_once=0", (sid, kid, pid))
+        conn.commit(); conn.close()
+        await update.callback_query.message.reply_text(
+            "✅ Key deleted.",
+            reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:viewkeys:{sid}:{pid}:{page}")]])
+        )
 
-    await update.callback_query.message.reply_text(
-        "\n\n".join(lines),
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb(btn_rows[:90])
-    )
+    async def mg_delallkeys(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
+        parts = update.callback_query.data.split(":")
+        # mg:delallkeys:sid:pid:page
+        sid = int(parts[2]); pid = int(parts[3]); page = int(parts[4])
 
-async def mg_delkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    # mg:delkey:sid:pid:keyid:page
-    _, _, sid_s, pid_s, kid_s, page_s = update.callback_query.data.split(":")
-    sid = int(sid_s); pid = int(pid_s); kid = int(kid_s); page = int(page_s)
-
-    conn = db(); cur = conn.cursor()
-    cur.execute("SELECT delivered_once FROM product_keys WHERE shop_owner_id=? AND id=? AND product_id=?", (sid, kid, pid))
-    r = cur.fetchone()
-    if not r:
-        conn.close()
-        await update.callback_query.message.reply_text("Key not found.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:viewkeys:{sid}:{pid}:{page}")]]))
-        return
-    if int(r["delivered_once"] or 0) == 1:
-        conn.close()
-        await update.callback_query.message.reply_text("❌ Cannot delete a delivered key.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:viewkeys:{sid}:{pid}:{page}")]]))
-        return
-
-    cur.execute("DELETE FROM product_keys WHERE shop_owner_id=? AND id=? AND product_id=? AND delivered_once=0", (sid, kid, pid))
-    conn.commit(); conn.close()
-    await update.callback_query.message.reply_text("✅ Key deleted.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:viewkeys:{sid}:{pid}:{page}")]]))
-
-async def mg_delallkeys(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    _, _, sid_s, pid_s = update.callback_query.data.split(":")
-    sid = int(sid_s); pid = int(pid_s)
-    clear_keys(sid, pid)
-    await update.callback_query.message.reply_text("✅ Deleted all UNUSED keys.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:prod:{sid}:{pid}")]]))
+        conn = db(); cur = conn.cursor()
+        cur.execute("DELETE FROM product_keys WHERE shop_owner_id=? AND product_id=? AND delivered_once=0", (sid, pid))
+        conn.commit(); conn.close()
+        await update.callback_query.message.reply_text(
+            "✅ Deleted all unused keys.",
+            reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:viewkeys:{sid}:{pid}:{page}")]])
+        )
 
 
     # Super Admin area
@@ -2873,7 +2889,7 @@ async def mg_delallkeys(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         txt = (
             "👑 <b>Super Admin Panel</b>\n\n"
-            "• Edit Connect My Bot text/buttons\n"
+            "• Edit Connect Bot text/buttons\n"
             "• Manage sellers and deposits\n"
         )
         rows = [
@@ -2890,7 +2906,7 @@ async def mg_delallkeys(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return (s.get(k) or "").strip() or "(empty)"
 
         fields = [
-            ("connect_desc", "Connect My Bot — Description"),
+            ("connect_desc", "Connect Bot — Description"),
             ("connect_free_title", "Free to Use — Button Text"),
             ("connect_free_desc", "Free to Use — Description"),
             ("connect_premium_title", "Premium — Button Text"),
@@ -2921,7 +2937,7 @@ async def mg_delallkeys(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ("btn_wallet", "Menu Button: Wallet"),
             ("btn_history", "Menu Button: History"),
             ("btn_support", "Menu Button: Support"),
-            ("btn_connect", "Menu Button: Connect My Bot"),
+            ("btn_connect", "Menu Button: Connect Bot"),
             ("btn_lang", "Menu Button: Language"),
             ("btn_admin", "Menu Button: Admin Panel"),
             ("btn_super", "Menu Button: Super Admin"),
