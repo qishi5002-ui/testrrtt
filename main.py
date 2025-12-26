@@ -3313,6 +3313,12 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             await sa_editui(update, context); return
         if data.startswith("sa:editui:pick:"):
             await sa_editui_pick(update, context); return
+        if data == "sa:edittexts":
+            await sa_edittexts(update, context); return
+        if data.startswith("sa:edittext:"):
+            await sa_edittext_pick(update, context); return
+        if data == "sa:noop":
+            await q.answer(); return
         if data.startswith("sa:"):
             await super_action(update, context); return
 
