@@ -561,6 +561,64 @@ def ui_delete(key: str):
     cur.execute('DELETE FROM ui_texts WHERE key=?', (key,))
     conn.commit(); conn.close()
 
+
+# ---------------- SAFE SEND HELPERS ----------------
+async def _send_html_safe(bot, chat_id: int, text: str, reply_markup=None, disable_web_page_preview: bool = True):
+    """Send HTML if possible; if Telegram rejects entities, fall back to plain text."""
+    try:
+        return await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+            disable_web_page_preview=disable_web_page_preview
+        )
+    except Exception:
+        try:
+            return await bot.send_message(
+                chat_id=chat_id,
+                text=re.sub(r"<[^>]+>", "", text),
+                reply_markup=reply_markup,
+                disable_web_page_preview=disable_web_page_preview
+            )
+        except Exception:
+            raise
+
+async def _reply_html_safe(message, text: str, reply_markup=None, disable_web_page_preview: bool = True):
+    try:
+        return await message.reply_text(
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+            disable_web_page_preview=disable_web_page_preview
+        )
+    except Exception:
+        return await message.reply_text(
+            text=re.sub(r"<[^>]+>", "", text),
+            reply_markup=reply_markup,
+            disable_web_page_preview=disable_web_page_preview
+        )
+
+async def _send_photo_safe(bot, chat_id: int, photo: str, caption: str = "", reply_markup=None):
+    try:
+        return await bot.send_photo(chat_id=chat_id, photo=photo, caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    except Exception:
+        return await bot.send_photo(chat_id=chat_id, photo=photo, caption=re.sub(r"<[^>]+>", "", caption), reply_markup=reply_markup)
+
+async def _send_video_safe(bot, chat_id: int, video: str, caption: str = "", reply_markup=None):
+    try:
+        return await bot.send_video(chat_id=chat_id, video=video, caption=caption, parse_mode=ParseMode.HTML, reply_markup=reply_markup)
+    except Exception:
+        return await bot.send_video(chat_id=chat_id, video=video, caption=re.sub(r"<[^>]+>", "", caption), reply_markup=reply_markup)
+
+async def on_error(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Show real hidden errors in Railway logs
+    try:
+        log.exception("🔥 Handler error. update=%s", update, exc_info=context.error)
+    except Exception:
+        pass
+
+
 # ---------------- DB ----------------
 def db() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
@@ -1393,13 +1451,14 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         caption = title + (text or "")
 
         if file_id and ftype == "photo":
-            await context.bot.send_photo(update.effective_chat.id, photo=file_id, caption=caption, parse_mode=ParseMode.HTML, reply_markup=menu)
+            await _send_photo_safe(context.bot, update.effective_chat.id, photo=file_id, caption=caption, reply_markup=menu)
         elif file_id and ftype == "video":
-            await context.bot.send_video(update.effective_chat.id, video=file_id, caption=caption, parse_mode=ParseMode.HTML, reply_markup=menu)
+            await _send_video_safe(context.bot, update.effective_chat.id, video=file_id, caption=caption, reply_markup=menu)
         else:
-            await context.bot.send_message(update.effective_chat.id, caption, parse_mode=ParseMode.HTML, reply_markup=menu)
+            await _send_html_safe(context.bot, update.effective_chat.id, caption, reply_markup=menu)
 
     async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        log.info("✅ /start received | bot_kind=%s | user_id=%s", bot_kind, update.effective_user.id)
         upsert_user(update.effective_user)
         uid = update.effective_user.id
 
@@ -2860,7 +2919,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         plan = seller_plan(sid)
         txt = f"👤 Seller: <b>{esc(user_display(sid))}</b>\nPlan: <b>{esc(plan)}</b>\nDays left: <b>{days}</b>"
         rows = [
-            [InlineKeyboardButton("🛠 TakeOver Shop", callback_data=f"sa:take:{sid}")],
             [InlineKeyboardButton("🚫 Ban Shop", callback_data=f"sa:ban:{sid}"), InlineKeyboardButton("✅ Unban Shop", callback_data=f"sa:unban:{sid}")],
             [InlineKeyboardButton("🛑 Ban Panel", callback_data=f"sa:banp:{sid}"), InlineKeyboardButton("✅ Unban Panel", callback_data=f"sa:unbanp:{sid}")],
             [InlineKeyboardButton("⏳ Restrict 7d", callback_data=f"sa:res:{sid}:7"),
@@ -2948,25 +3006,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         sid = int(update.callback_query.data.split(":")[2])
         set_state(context, "order_search", {"shop_id": sid})
         await update.callback_query.message.reply_text(tr(uid, "ask_order_id"), reply_markup=admin_panel_kb(sid))
-
-
-async def super_takeover_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    if not is_super(update.effective_user.id):
-        await update.callback_query.message.reply_text("❌ Not allowed.")
-        return
-    seller_id = int(update.callback_query.data.split(":")[2])
-
-    await update.callback_query.message.reply_text(
-        f"🛠 <b>TakeOver Shop</b>\n\nYou are now managing: <b>{esc(user_display(seller_id))}</b>\nID: <code>{seller_id}</code>\n\n( Seller is not notified )",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb([
-            [InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{seller_id}")],
-            [InlineKeyboardButton("⬅️ Back", callback_data=f"sa:sel:{seller_id}")],
-            [InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]
-        ])
-    )
-
 
 # ---------- TEXT/MEDIA INPUT (all flows) ----------
     async def text_or_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3582,9 +3621,6 @@ async def super_takeover_shop(update: Update, context: ContextTypes.DEFAULT_TYPE
             await super_sellers(update, context); return
         if data == "sa:search":
             await super_search(update, context); return
-        if data.startswith("sa:take:"):
-            await super_takeover_shop(update, context); return
-
         if data.startswith("sa:sel:"):
             await super_seller_open(update, context); return
         if data == "sa:home":
@@ -3640,6 +3676,7 @@ async def super_takeover_shop(update: Update, context: ContextTypes.DEFAULT_TYPE
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CallbackQueryHandler(callbacks))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO | filters.VIDEO, message_router))
+    app.add_error_handler(on_error)
 
 # ---------------- MAIN ----------------
 async def main():
