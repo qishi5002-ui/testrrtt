@@ -2949,6 +2949,25 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         set_state(context, "order_search", {"shop_id": sid})
         await update.callback_query.message.reply_text(tr(uid, "ask_order_id"), reply_markup=admin_panel_kb(sid))
 
+
+async def super_takeover_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    if not is_super(update.effective_user.id):
+        await update.callback_query.message.reply_text("❌ Not allowed.")
+        return
+    seller_id = int(update.callback_query.data.split(":")[2])
+
+    await update.callback_query.message.reply_text(
+        f"🛠 <b>TakeOver Shop</b>\n\nYou are now managing: <b>{esc(user_display(seller_id))}</b>\nID: <code>{seller_id}</code>\n\n( Seller is not notified )",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb([
+            [InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{seller_id}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data=f"sa:sel:{seller_id}")],
+            [InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]
+        ])
+    )
+
+
 # ---------- TEXT/MEDIA INPUT (all flows) ----------
     async def text_or_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         upsert_user(update.effective_user)
@@ -3095,24 +3114,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             await update.message.reply_text("Matches:", reply_markup=kb(rows))
             return
 
-
-async def super_takeover_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    if not is_super(update.effective_user.id):
-        await update.callback_query.message.reply_text("❌ Not allowed.")
-        return
-    sid = int(update.callback_query.data.split(":")[2])
-    await update.callback_query.message.reply_text(
-        f"🛠 <b>TakeOver Shop</b>\nYou are now managing seller: <code>{sid}</code>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb([
-            [InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}")],
-            [InlineKeyboardButton("⬅️ Back to Seller", callback_data=f"sa:sel:{sid}")],
-            [InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]
-        ])
-    )
-
-    # super admin seller balance
+# super admin seller balance
         if state == "super_edit_balance":
             sid = int(data["seller_id"])
             t = (update.message.text or "").strip().replace(" ", "")
@@ -3129,24 +3131,7 @@ async def super_takeover_shop(update: Update, context: ContextTypes.DEFAULT_TYPE
             return
 
 
-        
-async def super_takeover_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    if not is_super(update.effective_user.id):
-        await update.callback_query.message.reply_text("❌ Not allowed.")
-        return
-    sid = int(update.callback_query.data.split(":")[2])
-    await update.callback_query.message.reply_text(
-        f"🛠 <b>TakeOver Shop</b>\nYou are now managing seller: <code>{sid}</code>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb([
-            [InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}")],
-            [InlineKeyboardButton("⬅️ Back to Seller", callback_data=f"sa:sel:{sid}")],
-            [InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]
-        ])
-    )
-
-    # super admin edit english ui text
+        # super admin edit english ui text
         if state == "sa_edittext":
             key = (data.get("key") or "").strip()
             val = (update.message.text or "").strip()
@@ -3590,24 +3575,7 @@ async def super_takeover_shop(update: Update, context: ContextTypes.DEFAULT_TYPE
             conn.commit(); conn.close()
             await q.message.reply_text("✅ Sub-category deleted.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:cat:{sid}:{cat_id}")]])); return
 
-        
-async def super_takeover_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    if not is_super(update.effective_user.id):
-        await update.callback_query.message.reply_text("❌ Not allowed.")
-        return
-    sid = int(update.callback_query.data.split(":")[2])
-    await update.callback_query.message.reply_text(
-        f"🛠 <b>TakeOver Shop</b>\nYou are now managing seller: <code>{sid}</code>",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb([
-            [InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}")],
-            [InlineKeyboardButton("⬅️ Back to Seller", callback_data=f"sa:sel:{sid}")],
-            [InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]
-        ])
-    )
-
-    # super admin
+        # super admin
         if data == "m:super":
             await super_open(update, context); return
         if data == "sa:sellers":
