@@ -17,7 +17,7 @@
 # =========================
 # IMPORTANT RULES IMPLEMENTED
 # =========================
-# - Master shop users see: Products / Wallet / History / Support / Connect My Bot
+# - Master shop users see: Products / Wallet / History / Support / Connect Bot
 # - Seller bot users see ONLY seller shop: Products / Wallet / History / Support
 # - Seller owner (and Super Admin) in seller bot sees: Admin Panel + Extend Subscription
 # - Admin Panel (master: super admin only) (seller: owner + super admin unless panel banned)
@@ -32,9 +32,9 @@
 # - Keys: 1 line = 1 stock; delivered lines are never reused.
 # - Purchase quantity +- then Buy; gives key lines and Get File button hides the link.
 # - Plan logic:
-#       Plan A ($5) -> Branded
+#        ($5) -> Branded
 #           If already Branded and ACTIVE, paying $5 upgrades to White-label (your rule)
-#       Plan B ($10) -> White-label
+#        ($10) -> White-label
 #       White-label cannot pay $5 (blocked)
 # - Branding:
 #       ONLY welcome messages (seller shops) append "Bot made by @RekkoOwn" when branded or expired.
@@ -223,7 +223,7 @@ TRANSLATIONS = {'ar': {'ask_order_id': 'أرسل رقم الطلب:',
         'btn_lang': '🌐 Sprache',
         'btn_products': '🛒 Produkte',
         'btn_super': '👑 Super-Admin',
-        'btn_support': '🆘 Support / Feedback',
+        'btn_support': '🆘 Help / Feedback',
         'btn_wallet': '💰 Wallet',
         'lang_saved': '✅ Sprache gespeichert.',
         'lang_title': 'Sprache wählen:',
@@ -231,13 +231,13 @@ TRANSLATIONS = {'ar': {'ask_order_id': 'أرسل رقم الطلب:',
         'order_found': '✅ Bestellung gefunden:'},
  'en': {'ask_order_id': 'Send Order ID (example: ABC12345):',
         'btn_admin': '🛠 Admin Panel',
-        'btn_connect': '🤖 Connect My Bot',
+        'btn_connect': '🤖 Connect Bot',
         'btn_extend': '⏳ Extend Subscription',
         'btn_history': '📜 History',
         'btn_lang': '🌐 Language',
         'btn_products': '🛒 Products',
         'btn_super': '👑 Super Admin',
-        'btn_support': '🆘 Support / Feedback',
+        'btn_support': '🆘 Help / Feedback',
         'btn_wallet': '💰 Wallet',
         'lang_saved': '✅ Language saved.',
         'lang_title': '🌐 <b>Choose Language</b>',
@@ -614,7 +614,7 @@ def init_db():
         welcome_file_id TEXT DEFAULT '',
         welcome_file_type TEXT DEFAULT '', -- photo/video
 
-        -- Connect My Bot UI (editable by Super Admin)
+        -- Connect Bot UI (editable by Super Admin)
         connect_desc TEXT DEFAULT '',
         connect_free_title TEXT DEFAULT '',
         connect_free_desc TEXT DEFAULT '',
@@ -812,7 +812,7 @@ def init_db():
         )
     if not (s["connect_desc"] or "").strip():
         set_shop_setting(SUPER_ADMIN_ID, "connect_desc",
-            "🤖 <b>Connect My Bot</b>\n\n"
+            "🤖 <b>Connect Bot</b>\n\n"
             "Create your own bot at @BotFather, then connect your token here.\n"
             "Choose Free to Use (with branding) or Premium (no branding).\n"
         )
@@ -2066,7 +2066,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         add_ticket_msg(tid, update.effective_user.id, text)
         await update.message.reply_text("✅ Replied.", reply_markup=kb([[InlineKeyboardButton("⬅️ Admin", callback_data="m:admin")]]))
 
-    # ---------- Connect My Bot (master only) ----------
+    # ---------- Connect Bot (master only) ----------
     async def connect_screen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         if bot_kind != "master":
@@ -2239,8 +2239,8 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         txt = f"⏳ <b>Extend Subscription</b>\n\nDays left: <b>{days_left}</b>\nCurrent plan: <b>{esc(cur_plan)}</b>\nMain Shop balance: <b>{money(bal)} {esc(CURRENCY)}</b>\n\nChoose:"
         rows = []
         if cur_plan != "whitelabel":
-            rows.append([InlineKeyboardButton(f"Pay {money(PLAN_A_PRICE)} {CURRENCY} (Plan A)", callback_data="e:plan:a")])
-        rows.append([InlineKeyboardButton(f"Pay {money(PLAN_B_PRICE)} {CURRENCY} (Plan B)", callback_data="e:plan:b")])
+            rows.append([InlineKeyboardButton(f"Pay {money(PLAN_A_PRICE)} {CURRENCY} ()", callback_data="e:plan:a")])
+        rows.append([InlineKeyboardButton(f"Pay {money(PLAN_B_PRICE)} {CURRENCY} ()", callback_data="e:plan:b")])
         rows.append([InlineKeyboardButton("🏠 Menu", callback_data="m:menu")])
         await update.effective_chat.send_message(txt, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
 
@@ -2262,7 +2262,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return
         cur_plan = seller_plan(uid)
         if cur_plan == "whitelabel" and plan == "a":
-            await update.callback_query.message.reply_text("❌ White-Label cannot pay $5. Choose Plan B.")
+            await update.callback_query.message.reply_text("❌ White-Label cannot pay $5. Choose .")
             return
 
         price = PLAN_A_PRICE if plan == "a" else PLAN_B_PRICE
@@ -2721,7 +2721,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return
         txt = (
             "👑 <b>Super Admin Panel</b>\n\n"
-            "• Edit Connect My Bot text/buttons\n"
+            "• Edit Connect Bot text/buttons\n"
             "• Manage sellers and deposits\n"
         )
         rows = [
@@ -2738,7 +2738,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return (s.get(k) or "").strip() or "(empty)"
 
         fields = [
-            ("connect_desc", "Connect My Bot — Description"),
+            ("connect_desc", "Connect Bot — Description"),
             ("connect_free_title", "Free to Use — Button Text"),
             ("connect_free_desc", "Free to Use — Description"),
             ("connect_premium_title", "Premium — Button Text"),
@@ -2769,7 +2769,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             ("btn_wallet", "Menu Button: Wallet"),
             ("btn_history", "Menu Button: History"),
             ("btn_support", "Menu Button: Support"),
-            ("btn_connect", "Menu Button: Connect My Bot"),
+            ("btn_connect", "Menu Button: Connect Bot"),
             ("btn_lang", "Menu Button: Language"),
             ("btn_admin", "Menu Button: Admin Panel"),
             ("btn_super", "Menu Button: Super Admin"),
