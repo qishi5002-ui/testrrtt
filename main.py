@@ -17,7 +17,7 @@
 # =========================
 # IMPORTANT RULES IMPLEMENTED
 # =========================
-# - Master shop users see: Products / Wallet / History / Support / Connect Bot
+# - Master shop users see: Products / Wallet / History / Support / Connect My Bot
 # - Seller bot users see ONLY seller shop: Products / Wallet / History / Support
 # - Seller owner (and Super Admin) in seller bot sees: Admin Panel + Extend Subscription
 # - Admin Panel (master: super admin only) (seller: owner + super admin unless panel banned)
@@ -32,9 +32,9 @@
 # - Keys: 1 line = 1 stock; delivered lines are never reused.
 # - Purchase quantity +- then Buy; gives key lines and Get File button hides the link.
 # - Plan logic:
-#        ($5) -> Branded
+#       Plan A ($5) -> Branded
 #           If already Branded and ACTIVE, paying $5 upgrades to White-label (your rule)
-#        ($10) -> White-label
+#       Plan B ($10) -> White-label
 #       White-label cannot pay $5 (blocked)
 # - Branding:
 #       ONLY welcome messages (seller shops) append "Bot made by @RekkoOwn" when branded or expired.
@@ -223,7 +223,7 @@ TRANSLATIONS = {'ar': {'ask_order_id': 'أرسل رقم الطلب:',
         'btn_lang': '🌐 Sprache',
         'btn_products': '🛒 Produkte',
         'btn_super': '👑 Super-Admin',
-        'btn_support': '🆘 Help / Feedback',
+        'btn_support': '🆘 Support / Feedback',
         'btn_wallet': '💰 Wallet',
         'lang_saved': '✅ Sprache gespeichert.',
         'lang_title': 'Sprache wählen:',
@@ -231,13 +231,13 @@ TRANSLATIONS = {'ar': {'ask_order_id': 'أرسل رقم الطلب:',
         'order_found': '✅ Bestellung gefunden:'},
  'en': {'ask_order_id': 'Send Order ID (example: ABC12345):',
         'btn_admin': '🛠 Admin Panel',
-        'btn_connect': '🤖 Connect Bot',
+        'btn_connect': '🤖 Connect My Bot',
         'btn_extend': '⏳ Extend Subscription',
         'btn_history': '📜 History',
         'btn_lang': '🌐 Language',
         'btn_products': '🛒 Products',
         'btn_super': '👑 Super Admin',
-        'btn_support': '🆘 Help / Feedback',
+        'btn_support': '🆘 Support / Feedback',
         'btn_wallet': '💰 Wallet',
         'lang_saved': '✅ Language saved.',
         'lang_title': '🌐 <b>Choose Language</b>',
@@ -614,7 +614,7 @@ def init_db():
         welcome_file_id TEXT DEFAULT '',
         welcome_file_type TEXT DEFAULT '', -- photo/video
 
-        -- Connect Bot UI (editable by Super Admin)
+        -- Connect My Bot UI (editable by Super Admin)
         connect_desc TEXT DEFAULT '',
         connect_free_title TEXT DEFAULT '',
         connect_free_desc TEXT DEFAULT '',
@@ -812,7 +812,7 @@ def init_db():
         )
     if not (s["connect_desc"] or "").strip():
         set_shop_setting(SUPER_ADMIN_ID, "connect_desc",
-            "🤖 <b>Connect Bot</b>\n\n"
+            "🤖 <b>Connect My Bot</b>\n\n"
             "Create your own bot at @BotFather, then connect your token here.\n"
             "Choose Free to Use (with branding) or Premium (no branding).\n"
         )
@@ -2066,7 +2066,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         add_ticket_msg(tid, update.effective_user.id, text)
         await update.message.reply_text("✅ Replied.", reply_markup=kb([[InlineKeyboardButton("⬅️ Admin", callback_data="m:admin")]]))
 
-    # ---------- Connect Bot (master only) ----------
+    # ---------- Connect My Bot (master only) ----------
     async def connect_screen(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
         if bot_kind != "master":
@@ -2232,35 +2232,16 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         )
 
     async def show_extend_master(update: Update, context: ContextTypes.DEFAULT_TYPE, uid: int):
-        """Extend subscription from Main Shop (Master bot deep-link /start extend)."""
         ensure_seller(uid)
-
-        # Block renewal if seller is banned/restricted from using the system
-        r = seller_row(uid)
-        if r and (int(r["banned_shop"] or 0) == 1 or int(r["restricted_until"] or 0) > ts()):
-            await update.effective_chat.send_message(
-                "❌ You are not allowed to renew at the moment.",
-                reply_markup=kb([[InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]])
-            )
-            return
-
+        cur_plan = seller_plan(uid)
         days_left = seller_days_left(uid)
         bal = get_balance(SUPER_ADMIN_ID, uid)
-
-        price = 5.0
-        txt = (
-            f"⏳ <b>Extend Subscription</b>\n\n"
-            f"Current days left: <b>{days_left}</b>\n"
-            f"Main Shop balance: <b>{money(bal)} {esc(CURRENCY)}</b>\n\n"
-            f"Renewal: <b>{money(price)} {esc(CURRENCY)}</b> / <b>30 Days</b>\n"
-            f"Plan: <b>White-label</b> (No branding)\n\n"
-            f"Tap below to renew:"
-        )
-
-        rows = [
-            [InlineKeyboardButton(f"💳 Pay {money(price)} {CURRENCY} — 30 Days (White-label)", callback_data="e:renew")],
-            [InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]
-        ]
+        txt = f"⏳ <b>Extend Subscription</b>\n\nDays left: <b>{days_left}</b>\nCurrent plan: <b>{esc(cur_plan)}</b>\nMain Shop balance: <b>{money(bal)} {esc(CURRENCY)}</b>\n\nChoose:"
+        rows = []
+        if cur_plan != "whitelabel":
+            rows.append([InlineKeyboardButton(f"Pay {money(PLAN_A_PRICE)} {CURRENCY} (Plan A)", callback_data="e:plan:a")])
+        rows.append([InlineKeyboardButton(f"Pay {money(PLAN_B_PRICE)} {CURRENCY} (Plan B)", callback_data="e:plan:b")])
+        rows.append([InlineKeyboardButton("🏠 Menu", callback_data="m:menu")])
         await update.effective_chat.send_message(txt, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
 
     async def extend_choose(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2268,37 +2249,42 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         if bot_kind != "master":
             return
         uid = update.effective_user.id
+        plan = update.callback_query.data.split(":")[2]
         ensure_seller(uid)
 
-        # Support legacy callback_data (e:plan:*) but the UI now exposes only one option.
-        if not (update.callback_query.data == "e:renew" or update.callback_query.data.startswith("e:plan:")):
+        # Block banned/restricted users from renewing subscription
+        if is_banned_user(SUPER_ADMIN_ID, uid):
+            await update.callback_query.message.reply_text("❌ You are banned/restricted from Main Shop.")
+            return
+        sr = seller_row(uid)
+        if sr and (int(sr["banned_shop"] or 0) == 1 or int(sr["restricted_until"] or 0) > ts()):
+            await update.callback_query.message.reply_text("❌ Your seller shop is banned/restricted. You cannot renew subscription.")
+            return
+        cur_plan = seller_plan(uid)
+        if cur_plan == "whitelabel" and plan == "a":
+            await update.callback_query.message.reply_text("❌ White-Label cannot pay $5. Choose Plan B.")
             return
 
-        r = seller_row(uid)
-        if r and (int(r["banned_shop"] or 0) == 1 or int(r["restricted_until"] or 0) > ts()):
-            await update.callback_query.message.reply_text("❌ You are not allowed to renew at the moment.")
-            return
-
-        price = 5.0
+        price = PLAN_A_PRICE if plan == "a" else PLAN_B_PRICE
         bal = get_balance(SUPER_ADMIN_ID, uid)
         if bal < price:
             await update.callback_query.message.reply_text("❌ Not enough balance. Deposit first.")
             return
 
-        # Deduct from Main Shop balance
         set_balance(SUPER_ADMIN_ID, uid, bal - price)
 
-        # Always renew as White-label (no branding), 30 days
-        seller_set_plan(uid, "whitelabel")
-        seller_add_days(uid, 30)
-        log_tx(SUPER_ADMIN_ID, uid, "plan", -price, "White-Label", 1)
+        if plan == "b":
+            seller_set_plan(uid, "whitelabel")
+            note = "White-Label"
+        else:
+            seller_set_plan(uid, "whitelabel")
+            note = "White-Label (upgrade via $5)"
 
-        await update.callback_query.message.reply_text(
-            f"✅ Renewed.\nPlan: White-Label\nDays left: {seller_days_left(uid)}",
-            reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]])
-        )
+        seller_add_days(uid, PLAN_DAYS)
+        log_tx(SUPER_ADMIN_ID, uid, "plan", -price, note, 1)
 
-        # Restart seller bot if connected & active
+        await update.callback_query.message.reply_text(f"✅ Renewed.\nPlan: {note}\nDays left: {seller_days_left(uid)}", reply_markup=kb([[InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]]))
+
         sb = get_seller_bot(uid)
         if sb and int(sb["enabled"] or 0) == 1 and seller_active(uid):
             try:
@@ -2735,7 +2721,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return
         txt = (
             "👑 <b>Super Admin Panel</b>\n\n"
-            "• Edit Connect Bot text/buttons\n"
+            "• Edit Connect My Bot text/buttons\n"
             "• Manage sellers and deposits\n"
         )
         rows = [
@@ -2752,7 +2738,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return (s.get(k) or "").strip() or "(empty)"
 
         fields = [
-            ("connect_desc", "Connect Bot — Description"),
+            ("connect_desc", "Connect My Bot — Description"),
             ("connect_free_title", "Free to Use — Button Text"),
             ("connect_free_desc", "Free to Use — Description"),
             ("connect_premium_title", "Premium — Button Text"),
@@ -2783,7 +2769,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             ("btn_wallet", "Menu Button: Wallet"),
             ("btn_history", "Menu Button: History"),
             ("btn_support", "Menu Button: Support"),
-            ("btn_connect", "Menu Button: Connect Bot"),
+            ("btn_connect", "Menu Button: Connect My Bot"),
             ("btn_lang", "Menu Button: Language"),
             ("btn_admin", "Menu Button: Admin Panel"),
             ("btn_super", "Menu Button: Super Admin"),
@@ -2874,6 +2860,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         plan = seller_plan(sid)
         txt = f"👤 Seller: <b>{esc(user_display(sid))}</b>\nPlan: <b>{esc(plan)}</b>\nDays left: <b>{days}</b>"
         rows = [
+            [InlineKeyboardButton("🛠 TakeOver Shop", callback_data=f"sa:take:{sid}")],
             [InlineKeyboardButton("🚫 Ban Shop", callback_data=f"sa:ban:{sid}"), InlineKeyboardButton("✅ Unban Shop", callback_data=f"sa:unban:{sid}")],
             [InlineKeyboardButton("🛑 Ban Panel", callback_data=f"sa:banp:{sid}"), InlineKeyboardButton("✅ Unban Panel", callback_data=f"sa:unbanp:{sid}")],
             [InlineKeyboardButton("⏳ Restrict 7d", callback_data=f"sa:res:{sid}:7"),
@@ -3108,7 +3095,24 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             await update.message.reply_text("Matches:", reply_markup=kb(rows))
             return
 
-# super admin seller balance
+
+async def super_takeover_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    if not is_super(update.effective_user.id):
+        await update.callback_query.message.reply_text("❌ Not allowed.")
+        return
+    sid = int(update.callback_query.data.split(":")[2])
+    await update.callback_query.message.reply_text(
+        f"🛠 <b>TakeOver Shop</b>\nYou are now managing seller: <code>{sid}</code>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb([
+            [InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}")],
+            [InlineKeyboardButton("⬅️ Back to Seller", callback_data=f"sa:sel:{sid}")],
+            [InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]
+        ])
+    )
+
+    # super admin seller balance
         if state == "super_edit_balance":
             sid = int(data["seller_id"])
             t = (update.message.text or "").strip().replace(" ", "")
@@ -3125,7 +3129,24 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return
 
 
-        # super admin edit english ui text
+        
+async def super_takeover_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    if not is_super(update.effective_user.id):
+        await update.callback_query.message.reply_text("❌ Not allowed.")
+        return
+    sid = int(update.callback_query.data.split(":")[2])
+    await update.callback_query.message.reply_text(
+        f"🛠 <b>TakeOver Shop</b>\nYou are now managing seller: <code>{sid}</code>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb([
+            [InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}")],
+            [InlineKeyboardButton("⬅️ Back to Seller", callback_data=f"sa:sel:{sid}")],
+            [InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]
+        ])
+    )
+
+    # super admin edit english ui text
         if state == "sa_edittext":
             key = (data.get("key") or "").strip()
             val = (update.message.text or "").strip()
@@ -3396,7 +3417,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         # extend
         if data == "m:extend":
             await extend_in_seller(update, context); return
-        if data == "e:renew" or data.startswith("e:plan:"):
+        if data.startswith("e:plan:"):
             await extend_choose(update, context); return
 
         # admin panel
@@ -3569,13 +3590,33 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             conn.commit(); conn.close()
             await q.message.reply_text("✅ Sub-category deleted.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:cat:{sid}:{cat_id}")]])); return
 
-        # super admin
+        
+async def super_takeover_shop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    if not is_super(update.effective_user.id):
+        await update.callback_query.message.reply_text("❌ Not allowed.")
+        return
+    sid = int(update.callback_query.data.split(":")[2])
+    await update.callback_query.message.reply_text(
+        f"🛠 <b>TakeOver Shop</b>\nYou are now managing seller: <code>{sid}</code>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb([
+            [InlineKeyboardButton("🧩 Manage Catalog", callback_data=f"a:manage:{sid}")],
+            [InlineKeyboardButton("⬅️ Back to Seller", callback_data=f"sa:sel:{sid}")],
+            [InlineKeyboardButton("🏠 Menu", callback_data="m:menu")]
+        ])
+    )
+
+    # super admin
         if data == "m:super":
             await super_open(update, context); return
         if data == "sa:sellers":
             await super_sellers(update, context); return
         if data == "sa:search":
             await super_search(update, context); return
+        if data.startswith("sa:take:"):
+            await super_takeover_shop(update, context); return
+
         if data.startswith("sa:sel:"):
             await super_seller_open(update, context); return
         if data == "sa:home":
