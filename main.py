@@ -2297,9 +2297,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         bal = get_balance(SUPER_ADMIN_ID, uid)
         txt = f"⏳ <b>Extend Subscription</b>\n\nDays left: <b>{days_left}</b>\nCurrent plan: <b>{esc(cur_plan)}</b>\nMain Shop balance: <b>{money(bal)} {esc(CURRENCY)}</b>\n\nChoose:"
         rows = []
-        if cur_plan != "whitelabel":
-            rows.append([InlineKeyboardButton(f"Pay {money(PLAN_A_PRICE)} {CURRENCY} (Plan A)", callback_data="e:plan:a")])
-        rows.append([InlineKeyboardButton(f"Pay {money(PLAN_B_PRICE)} {CURRENCY} (Plan B)", callback_data="e:plan:b")])
+        rows.append([InlineKeyboardButton(f"💎 {money(PLAN_B_PRICE)} {CURRENCY} / {PLAN_DAYS} Days (White-label)", callback_data="e:plan:b")])
         rows.append([InlineKeyboardButton("🏠 Menu", callback_data="m:menu")])
         await update.effective_chat.send_message(txt, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
 
@@ -3637,6 +3635,9 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             await q.answer(); return
         if data.startswith("sa:"):
             await super_action(update, context); return
+
+        if data == "noop":
+            await q.answer(); return
 
         await q.answer()
 
