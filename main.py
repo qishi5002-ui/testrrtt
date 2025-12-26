@@ -40,7 +40,7 @@
 #       ONLY welcome messages (seller shops) append "Bot made by @RekkoOwn" when branded or expired.
 #       No branding in menu messages.
 #
-import os, time, re, asyncio, sqlite3, logging, datetime, secrets
+import os, time, re, asyncio, sqlite3, logging, secrets, datetime, secrets
 from typing import Optional, Dict, Any, List, Tuple
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -89,48 +89,49 @@ def money(x: float) -> str:
     return f"{x:.2f}".rstrip("0").rstrip(".")
 
 
-import random
-import string
+# --- orders (Order ID + delivered keys) ---
+_ALPH = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
-def gen_order_id() -> str:
-    # Example: ORD-3F2A9C1B (uppercase hex)
-    return "ORD-" + secrets.token_hex(4).upper()
+def gen_order_id(n: int = 10) -> str:
+    return "ORD-" + "".join(secrets.choice(_ALPH) for _ in range(int(n)))
 
 def create_order(shop_owner_id: int, user_id: int, product_id: int, product_name: str, qty: int, total: float, keys: List[str]) -> str:
+    """Create an order row and return order_id. Never raises (best-effort)."""
     order_id = gen_order_id(10)
-    keys_text = "\n".join(keys)
+    keys_text = "\n".join(keys or [])
     conn = db(); cur = conn.cursor()
     for _ in range(5):
         try:
             cur.execute(
-                "INSERT INTO orders(shop_owner_id,user_id,order_id,product_id,product_name,qty,total,keys_text,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                (shop_owner_id, user_id, order_id, product_id, product_name, int(qty), float(total), keys_text, ts())
+                "INSERT INTO orders(order_id,shop_owner_id,user_id,product_id,product_name,qty,total,keys_text,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (order_id, int(shop_owner_id), int(user_id), int(product_id), product_name, int(qty), float(total), keys_text, ts())
             )
             conn.commit(); conn.close()
             return order_id
         except sqlite3.IntegrityError:
             order_id = gen_order_id(10)
-            continue
         except Exception:
-            # Schema mismatch / table missing in older DBs should not block delivery
             try:
-                conn.rollback()
+                conn.close()
             except Exception:
                 pass
-            conn.close()
             return order_id
-    conn.close()
+    try:
+        conn.close()
+    except Exception:
+        pass
     return order_id
 
-def list_orders(shop_owner_id: int, user_id: int, limit: int = 30) -> List[sqlite3.Row]:
+def list_orders(shop_owner_id: int, user_id: int, limit: int = 50) -> List[sqlite3.Row]:
     conn = db(); cur = conn.cursor()
-    cur.execute("SELECT * FROM orders WHERE shop_owner_id=? AND user_id=? ORDER BY id DESC LIMIT ?", (shop_owner_id, user_id, int(limit)))
+    cur.execute("SELECT * FROM orders WHERE shop_owner_id=? AND user_id=? ORDER BY created_at DESC LIMIT ?",
+                (int(shop_owner_id), int(user_id), int(limit)))
     rows = cur.fetchall(); conn.close()
     return rows
 
-def get_order_by_orderid(order_id: str) -> Optional[sqlite3.Row]:
+def get_order(shop_owner_id: int, order_id: str) -> Optional[sqlite3.Row]:
     conn = db(); cur = conn.cursor()
-    cur.execute("SELECT * FROM orders WHERE order_id=?", (order_id,))
+    cur.execute("SELECT * FROM orders WHERE shop_owner_id=? AND order_id=?", (int(shop_owner_id), (order_id or '').strip()))
     r = cur.fetchone(); conn.close()
     return r
 
@@ -202,24 +203,12 @@ TRANSLATIONS = {
         "ask_order_id": "Send Order ID (example: ABC12345):",
         "no_match": "❌ No match found.",
         "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
     },
     "id": {
         "btn_products": "🛒 Produk",
         "btn_wallet": "💰 Dompet",
         "btn_history": "📜 Riwayat",
-        "btn_support": "🆘 Dukungan / Masukan",
+        "btn_support": "🆘 Bantuan / Masukan",
         "btn_connect": "🤖 Hubungkan Bot Saya",
         "btn_admin": "🛠 Panel Admin",
         "btn_super": "👑 Super Admin",
@@ -227,133 +216,9 @@ TRANSLATIONS = {
         "btn_lang": "🌐 Bahasa",
         "lang_title": "🌐 <b>Pilih Bahasa</b>",
         "lang_saved": "✅ Bahasa disimpan.",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
+        "ask_order_id": "Kirim Order ID (contoh: ABC12345):",
         "no_match": "❌ Tidak ditemukan.",
         "order_found": "✅ <b>Pesanan Ditemukan</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Gratis",
-        "connect_free_desc": "Gratis dengan branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Hapus branding (berbayar).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "ms": {
-        "btn_products": "🛒 Produk",
-        "btn_wallet": "💰 Dompet",
-        "btn_history": "📜 Sejarah",
-        "btn_support": "🆘 Sokongan / Maklum Balas",
-        "btn_connect": "🤖 Sambung Bot Saya",
-        "btn_admin": "🛠 Panel Admin",
-        "btn_super": "👑 Super Admin",
-        "btn_extend": "⏳ Lanjut Langganan",
-        "btn_lang": "🌐 Bahasa",
-        "lang_title": "🌐 <b>Pilih Bahasa</b>",
-        "lang_saved": "✅ Bahasa disimpan.",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ Tiada padanan.",
-        "order_found": "✅ <b>Pesanan Dijumpai</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "th": {
-        "btn_products": "🛒 สินค้า",
-        "btn_wallet": "💰 กระเป๋าเงิน",
-        "btn_history": "📜 ประวัติ",
-        "btn_support": "🆘 ซัพพอร์ต / ข้อเสนอแนะ",
-        "btn_connect": "🤖 เชื่อมต่อบอทของฉัน",
-        "btn_admin": "🛠 แผงแอดมิน",
-        "btn_super": "👑 ซูเปอร์แอดมิน",
-        "btn_extend": "⏳ ต่ออายุสมาชิก",
-        "btn_lang": "🌐 ภาษา",
-        "lang_title": "🌐 <b>เลือกภาษา</b>",
-        "lang_saved": "✅ บันทึกภาษาแล้ว",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ ไม่พบข้อมูล",
-        "order_found": "✅ <b>พบออเดอร์</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "vi": {
-        "btn_products": "🛒 Sản phẩm",
-        "btn_wallet": "💰 Ví",
-        "btn_history": "📜 Lịch sử",
-        "btn_support": "🆘 Hỗ trợ / Góp ý",
-        "btn_connect": "🤖 Kết nối Bot của tôi",
-        "btn_admin": "🛠 Bảng Admin",
-        "btn_super": "👑 Super Admin",
-        "btn_extend": "⏳ Gia hạn",
-        "btn_lang": "🌐 Ngôn ngữ",
-        "lang_title": "🌐 <b>Chọn ngôn ngữ</b>",
-        "lang_saved": "✅ Đã lưu ngôn ngữ.",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ Không tìm thấy.",
-        "order_found": "✅ <b>Đã tìm thấy đơn</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "tl": {
-        "btn_products": "🛒 Mga Produkto",
-        "btn_wallet": "💰 Wallet",
-        "btn_history": "📜 History",
-        "btn_support": "🆘 Support / Feedback",
-        "btn_connect": "🤖 I-connect ang Bot Ko",
-        "btn_admin": "🛠 Admin Panel",
-        "btn_super": "👑 Super Admin",
-        "btn_extend": "⏳ Extend Subscription",
-        "btn_lang": "🌐 Wika",
-        "lang_title": "🌐 <b>Pumili ng Wika</b>",
-        "lang_saved": "✅ Naka-save ang wika.",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ No match found.",
-        "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
     },
     "zh": {
         "btn_products": "🛒 商品",
@@ -363,493 +228,27 @@ TRANSLATIONS = {
         "btn_connect": "🤖 连接我的机器人",
         "btn_admin": "🛠 管理面板",
         "btn_super": "👑 超级管理员",
-        "btn_extend": "⏳ 续费",
+        "btn_extend": "⏳ 延长订阅",
         "btn_lang": "🌐 语言",
         "lang_title": "🌐 <b>选择语言</b>",
         "lang_saved": "✅ 已保存语言。",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ No match found.",
-        "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
+        "ask_order_id": "发送订单号 (例如: ABC12345):",
+        "no_match": "❌ 未找到。",
+        "order_found": "✅ <b>已找到订单</b>",
     },
-    "zh_hant": {
-        "btn_products": "🛒 商品",
-        "btn_wallet": "💰 錢包",
-        "btn_history": "📜 記錄",
-        "btn_support": "🆘 支援 / 回饋",
-        "btn_connect": "🤖 連接我的機器人",
-        "btn_admin": "🛠 管理面板",
-        "btn_super": "👑 超級管理員",
-        "btn_extend": "⏳ 續費",
-        "btn_lang": "🌐 語言",
-        "lang_title": "🌐 <b>選擇語言</b>",
-        "lang_saved": "✅ 已儲存語言。",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ No match found.",
-        "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "ja": {
-        "btn_products": "🛒 商品",
-        "btn_wallet": "💰 ウォレット",
-        "btn_history": "📜 履歴",
-        "btn_support": "🆘 サポート / フィードバック",
-        "btn_connect": "🤖 ボット接続",
-        "btn_admin": "🛠 管理パネル",
-        "btn_super": "👑 スーパー管理者",
-        "btn_extend": "⏳ 更新",
-        "btn_lang": "🌐 言語",
-        "lang_title": "🌐 <b>言語を選択</b>",
-        "lang_saved": "✅ 言語を保存しました。",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ No match found.",
-        "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "ko": {
-        "btn_products": "🛒 상품",
-        "btn_wallet": "💰 지갑",
-        "btn_history": "📜 기록",
-        "btn_support": "🆘 지원 / 피드백",
-        "btn_connect": "🤖 봇 연결",
-        "btn_admin": "🛠 관리자 패널",
-        "btn_super": "👑 슈퍼 관리자",
-        "btn_extend": "⏳ 연장",
-        "btn_lang": "🌐 언어",
-        "lang_title": "🌐 <b>언어 선택</b>",
-        "lang_saved": "✅ 언어가 저장되었습니다。",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ No match found.",
-        "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "ar": {
-        "btn_products": "🛒 المنتجات",
-        "btn_wallet": "💰 المحفظة",
-        "btn_history": "📜 السجل",
-        "btn_support": "🆘 الدعم / الملاحظات",
-        "btn_connect": "🤖 ربط البوت",
-        "btn_admin": "🛠 لوحة الإدارة",
-        "btn_super": "👑 المشرف العام",
-        "btn_extend": "⏳ تمديد الاشتراك",
-        "btn_lang": "🌐 اللغة",
-        "lang_title": "🌐 <b>اختر اللغة</b>",
-        "lang_saved": "✅ تم حفظ اللغة.",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ No match found.",
-        "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "hi": {
-        "btn_products": "🛒 उत्पाद",
-        "btn_wallet": "💰 वॉलेट",
-        "btn_history": "📜 इतिहास",
-        "btn_support": "🆘 सपोर्ट / फीडबैक",
-        "btn_connect": "🤖 मेरा बॉट कनेक्ट करें",
-        "btn_admin": "🛠 एडमिन पैनल",
-        "btn_super": "👑 सुपर एडमिन",
-        "btn_extend": "⏳ सब्सक्रिप्शन बढ़ाएँ",
-        "btn_lang": "🌐 भाषा",
-        "lang_title": "🌐 <b>भाषा चुनें</b>",
-        "lang_saved": "✅ भाषा सेव हो गई।",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ No match found.",
-        "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "bn": {
-        "btn_products": "🛒 পণ্য",
-        "btn_wallet": "💰 ওয়ালেট",
-        "btn_history": "📜 ইতিহাস",
-        "btn_support": "🆘 সাপোর্ট / ফিডব্যাক",
-        "btn_connect": "🤖 বট কানেক্ট",
-        "btn_admin": "🛠 অ্যাডমিন প্যানেল",
-        "btn_super": "👑 সুপার অ্যাডমিন",
-        "btn_extend": "⏳ সাবস্ক্রিপশন বাড়ান",
-        "btn_lang": "🌐 ভাষা",
-        "lang_title": "🌐 <b>ভাষা নির্বাচন করুন</b>",
-        "lang_saved": "✅ ভাষা সংরক্ষণ হয়েছে।",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ No match found.",
-        "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "ur": {
-        "btn_products": "🛒 پروڈکٹس",
-        "btn_wallet": "💰 والٹ",
-        "btn_history": "📜 ہسٹری",
-        "btn_support": "🆘 سپورٹ / فیڈبیک",
-        "btn_connect": "🤖 میرا بوٹ کنیکٹ کریں",
-        "btn_admin": "🛠 ایڈمن پینل",
-        "btn_super": "👑 سپر ایڈمن",
-        "btn_extend": "⏳ سبسکرپشن بڑھائیں",
-        "btn_lang": "🌐 زبان",
-        "lang_title": "🌐 <b>زبان منتخب کریں</b>",
-        "lang_saved": "✅ زبان محفوظ ہوگئی۔",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ No match found.",
-        "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "ru": {
-        "btn_products": "🛒 Товары",
-        "btn_wallet": "💰 Кошелёк",
-        "btn_history": "📜 История",
-        "btn_support": "🆘 Поддержка / Отзыв",
-        "btn_connect": "🤖 Подключить бота",
-        "btn_admin": "🛠 Админ-панель",
-        "btn_super": "👑 Супер-админ",
-        "btn_extend": "⏳ Продлить подписку",
-        "btn_lang": "🌐 Язык",
-        "lang_title": "🌐 <b>Выберите язык</b>",
-        "lang_saved": "✅ Язык сохранён.",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ No match found.",
-        "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "es": {
-        "btn_products": "🛒 Productos",
-        "btn_wallet": "💰 Billetera",
-        "btn_history": "📜 Historial",
-        "btn_support": "🆘 Soporte / Feedback",
-        "btn_connect": "🤖 Conectar mi bot",
-        "btn_admin": "🛠 Panel admin",
-        "btn_super": "👑 Super admin",
-        "btn_extend": "⏳ Renovar suscripción",
-        "btn_lang": "🌐 Idioma",
-        "lang_title": "🌐 <b>Elegir idioma</b>",
-        "lang_saved": "✅ Idioma guardado.",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ No match found.",
-        "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "pt": {
-        "btn_products": "🛒 Produtos",
-        "btn_wallet": "💰 Carteira",
-        "btn_history": "📜 Histórico",
-        "btn_support": "🆘 Suporte / Feedback",
-        "btn_connect": "🤖 Conectar meu bot",
-        "btn_admin": "🛠 Painel admin",
-        "btn_super": "👑 Super admin",
-        "btn_extend": "⏳ Renovar assinatura",
-        "btn_lang": "🌐 Idioma",
-        "lang_title": "🌐 <b>Escolher idioma</b>",
-        "lang_saved": "✅ Idioma salvo.",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ No match found.",
-        "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "fr": {
-        "btn_products": "🛒 Produits",
-        "btn_wallet": "💰 Portefeuille",
-        "btn_history": "📜 Historique",
-        "btn_support": "🆘 Support / Avis",
-        "btn_connect": "🤖 Connecter mon bot",
-        "btn_admin": "🛠 Panneau admin",
-        "btn_super": "👑 Super admin",
-        "btn_extend": "⏳ Renouveler",
-        "btn_lang": "🌐 Langue",
-        "lang_title": "🌐 <b>Choisir la langue</b>",
-        "lang_saved": "✅ Langue enregistrée.",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ No match found.",
-        "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "de": {
-        "btn_products": "🛒 Produkte",
-        "btn_wallet": "💰 Wallet",
-        "btn_history": "📜 Verlauf",
-        "btn_support": "🆘 Support / Feedback",
-        "btn_connect": "🤖 Bot verbinden",
-        "btn_admin": "🛠 Admin-Panel",
-        "btn_super": "👑 Super-Admin",
-        "btn_extend": "⏳ Abo verlängern",
-        "btn_lang": "🌐 Sprache",
-        "lang_title": "🌐 <b>Sprache wählen</b>",
-        "lang_saved": "✅ Sprache gespeichert.",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ No match found.",
-        "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "it": {
-        "btn_products": "🛒 Prodotti",
-        "btn_wallet": "💰 Portafoglio",
-        "btn_history": "📜 Cronologia",
-        "btn_support": "🆘 Supporto / Feedback",
-        "btn_connect": "🤖 Collega il mio bot",
-        "btn_admin": "🛠 Pannello admin",
-        "btn_super": "👑 Super admin",
-        "btn_extend": "⏳ Rinnova",
-        "btn_lang": "🌐 Lingua",
-        "lang_title": "🌐 <b>Scegli lingua</b>",
-        "lang_saved": "✅ Lingua salvata.",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ No match found.",
-        "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "tr": {
-        "btn_products": "🛒 Ürünler",
-        "btn_wallet": "💰 Cüzdan",
-        "btn_history": "📜 Geçmiş",
-        "btn_support": "🆘 Destek / Geri Bildirim",
-        "btn_connect": "🤖 Botumu Bağla",
-        "btn_admin": "🛠 Admin Paneli",
-        "btn_super": "👑 Süper Admin",
-        "btn_extend": "⏳ Aboneliği Uzat",
-        "btn_lang": "🌐 Dil",
-        "lang_title": "🌐 <b>Dil Seç</b>",
-        "lang_saved": "✅ Dil kaydedildi.",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ No match found.",
-        "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    },
-    "fa": {
-        "btn_products": "🛒 محصولات",
-        "btn_wallet": "💰 کیف پول",
-        "btn_history": "📜 تاریخچه",
-        "btn_support": "🆘 پشتیبانی / بازخورد",
-        "btn_connect": "🤖 اتصال ربات من",
-        "btn_admin": "🛠 پنل ادمین",
-        "btn_super": "👑 سوپر ادمین",
-        "btn_extend": "⏳ تمدید اشتراک",
-        "btn_lang": "🌐 زبان",
-        "lang_title": "🌐 <b>انتخاب زبان</b>",
-        "lang_saved": "✅ زبان ذخیره شد.",
-        "ask_order_id": "Send Order ID (example: ABC12345):",
-        "no_match": "❌ No match found.",
-        "order_found": "✅ <b>Order Found</b>",
-        "connect_desc": "🤖 <b>Connect My Bot</b>\n\nChoose an option below.",
-        "connect_free_title": "🆓 Free to Use",
-        "connect_free_desc": "Use for free with branding.",
-        "connect_premium_title": "💎 Premium",
-        "connect_premium_desc": "Remove branding (paid).",
-        "ui_edit_title": "✏️ <b>Edit Buttons / Descriptions</b>",
-        "ui_choose_lang": "Choose a language to edit:",
-        "ui_choose_key": "Choose what to edit:",
-        "ui_send_new": "Send new text now.\nSend <code>-</code> to reset to default.",
-        "ui_saved": "✅ Saved.",
-        "ui_reset": "✅ Reset to default.",
-        "ui_back": "⬅️ Back"
-    }
 }
-
-
-def ui_text_get(lang: str, key: str) -> Optional[str]:
-    """Return override text for (lang,key) if set by SUPER ADMIN."""
-    try:
-        row = db().execute("SELECT value FROM ui_texts WHERE lang=? AND key=?", (lang, key)).fetchone()
-        if row and row[0] is not None:
-            v = str(row[0]).strip()
-            return v if v else None
-    except Exception:
-        return None
-    return None
-
-
-def ui_text_set(lang: str, key: str, value: Optional[str]) -> None:
-    """Set override text; value=None or '-' means reset."""
-    if value is None:
-        db().execute("DELETE FROM ui_texts WHERE lang=? AND key=?", (lang, key))
-        db().commit()
-        return
-    v = str(value).strip()
-    if v == "-" or v == "":
-        db().execute("DELETE FROM ui_texts WHERE lang=? AND key=?", (lang, key))
-        db().commit()
-        return
-    db().execute(
-        "INSERT INTO ui_texts(lang, key, value) VALUES(?,?,?) "
-        "ON CONFLICT(lang, key) DO UPDATE SET value=excluded.value",
-        (lang, key, v),
-    )
-    db().commit()
-
 
 def tr(uid: int, key: str, fallback: str = "") -> str:
     lang = get_user_lang(uid)
-    # Super-admin overrides
-    ov = ui_text_get(lang, key)
-    if ov is not None:
-        return ov
-    # Built-in translations
-    if lang in TRANSLATIONS and key in (TRANSLATIONS.get(lang) or {}):
-        return (TRANSLATIONS.get(lang) or {}).get(key, fallback or key)
-    # Fallback to English
-    if key in (TRANSLATIONS.get("en") or {}):
-        return (TRANSLATIONS.get("en") or {}).get(key, fallback or key)
-    return fallback or key
+    # English can be overridden by Super Admin
+    if lang == "en":
+        ov = ui_get(key)
+        if (ov or '').strip():
+            return ov
+    d = TRANSLATIONS.get(lang) or TRANSLATIONS.get("en") or {}
+    if key in d:
+        return d[key]
+    return (TRANSLATIONS.get("en") or {}).get(key, fallback or key)
 
 def get_user_lang(uid: int) -> str:
     try:
@@ -869,6 +268,39 @@ def set_user_lang(uid: int, lang: str):
     conn = db(); cur = conn.cursor()
     cur.execute("INSERT INTO user_prefs(user_id, lang) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET lang=excluded.lang",
                 (int(uid), lang))
+    conn.commit(); conn.close()
+
+
+# ---------------- UI TEXT OVERRIDES (English only) ----------------
+# Super Admin can override English UI strings (buttons/prompts). Other languages still use TRANSLATIONS.
+
+def ui_get(key: str) -> str:
+    key = (key or '').strip()
+    if not key:
+        return ''
+    try:
+        conn = db(); cur = conn.cursor()
+        cur.execute('SELECT value FROM ui_texts WHERE key=?', (key,))
+        r = cur.fetchone(); conn.close()
+        return (r['value'] if r else '') or ''
+    except Exception:
+        return ''
+
+def ui_set(key: str, value: str):
+    key = (key or '').strip()
+    if not key:
+        return
+    conn = db(); cur = conn.cursor()
+    cur.execute('INSERT INTO ui_texts(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                (key, (value or '').strip()[:200]))
+    conn.commit(); conn.close()
+
+def ui_delete(key: str):
+    key = (key or '').strip()
+    if not key:
+        return
+    conn = db(); cur = conn.cursor()
+    cur.execute('DELETE FROM ui_texts WHERE key=?', (key,))
     conn.commit(); conn.close()
 
 # ---------------- DB ----------------
@@ -893,18 +325,7 @@ def init_db():
 
     cur.execute("CREATE TABLE IF NOT EXISTS users(user_id INTEGER PRIMARY KEY, username TEXT DEFAULT '', first_name TEXT DEFAULT '', last_name TEXT DEFAULT '', last_seen INTEGER DEFAULT 0)")
     cur.execute("CREATE TABLE IF NOT EXISTS user_prefs(user_id INTEGER PRIMARY KEY, lang TEXT DEFAULT 'en')")
-    # Super-admin editable UI texts (per language)
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS ui_texts(
-            lang TEXT NOT NULL,
-            key TEXT NOT NULL,
-            value TEXT NOT NULL,
-            PRIMARY KEY(lang, key)
-        )
-        """
-    )
-
+    cur.execute("CREATE TABLE IF NOT EXISTS ui_texts(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     cur.execute("CREATE TABLE IF NOT EXISTS sessions(user_id INTEGER PRIMARY KEY, shop_owner_id INTEGER NOT NULL, locked INTEGER DEFAULT 0)")
 
     cur.execute("""
@@ -1090,21 +511,8 @@ def init_db():
         created_at INTEGER NOT NULL
     )""")
 
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS orders(
-        order_id TEXT PRIMARY KEY,
-        shop_owner_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        product_id INTEGER NOT NULL,
-        product_name TEXT NOT NULL,
-        qty INTEGER NOT NULL,
-        total REAL NOT NULL,
-        keys_text TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-    )""")
-
-
     
+
     # --- lightweight migrations ---
     try:
         cur.execute("ALTER TABLE deposit_requests ADD COLUMN method_id TEXT DEFAULT ''")
@@ -1140,7 +548,6 @@ def init_db():
 
     ensure_shop_settings(SUPER_ADMIN_ID)
     s = dict(get_shop_settings(SUPER_ADMIN_ID))
-    s = dict(s)
     if not (s["welcome_text"] or "").strip():
         set_shop_setting(SUPER_ADMIN_ID, "welcome_text",
             f"✅ Welcome to <b>{esc(STORE_NAME)}</b>\nGet your 24/7 Store Panel Here !!\n\nBot created by @RekkoOwn\nGroup : @AutoPanels"
@@ -1303,71 +710,7 @@ def log_tx(shop_owner_id: int, uid: int, kind: str, amount: float, note: str = "
                 (shop_owner_id, uid, kind, float(amount), note or "", int(qty or 1), ts()))
     conn.commit(); conn.close()
 
-# --- orders (Order ID + delivered keys) ---
-_ALPH = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
-def gen_order_id(n: int = 10) -> str:
-    import secrets
-    return "ORD-" + "".join(secrets.choice(_ALPH) for _ in range(int(n)))
-
-def create_order(shop_owner_id: int, user_id: int, product_id: int, product_name: str, qty: int, total: float, keys: List[str]) -> str:
-    order_id = gen_order_id(10)
-    keys_text = "\n".join(keys or [])
-    conn = db(); cur = conn.cursor()
-    for _ in range(5):
-        try:
-            cur.execute(
-                "INSERT INTO orders(order_id,shop_owner_id,user_id,product_id,product_name,qty,total,keys_text,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                (order_id, int(shop_owner_id), int(user_id), int(product_id), product_name, int(qty), float(total), keys_text, ts())
-            )
-            conn.commit(); conn.close()
-            return order_id
-        except sqlite3.IntegrityError:
-            order_id = gen_order_id(10)
-        except Exception:
-            try: conn.close()
-            except Exception: pass
-            return order_id
-    try: conn.close()
-    except Exception: pass
-    return order_id
-
-def list_orders_for_user(shop_owner_id: int, user_id: int, limit: int = 30) -> List[sqlite3.Row]:
-    conn = db(); cur = conn.cursor()
-    cur.execute("SELECT * FROM orders WHERE shop_owner_id=? AND user_id=? ORDER BY created_at DESC LIMIT ?", (int(shop_owner_id), int(user_id), int(limit)))
-    rows = cur.fetchall(); conn.close()
-    return rows
-
-def get_order_by_id(order_id: str) -> Optional[sqlite3.Row]:
-    conn = db(); cur = conn.cursor()
-    cur.execute("SELECT * FROM orders WHERE order_id=?", ((order_id or "").strip(),))
-    r = cur.fetchone(); conn.close()
-    return r
-
-
-def create_order(shop_owner_id: int, user_id: int, product_id: int, product_name: str, qty: int, total: float, keys: List[str]) -> str:
-    order_id = new_order_id()
-    conn = db(); cur = conn.cursor()
-    cur.execute(
-        "INSERT INTO orders(order_id, shop_owner_id, user_id, product_id, product_name, qty, total, keys_text, created_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?)",
-        (order_id, shop_owner_id, user_id, product_id, product_name, int(qty), float(total), "\n".join(keys), ts())
-    )
-    conn.commit(); conn.close()
-    return order_id
-
-def list_orders(shop_owner_id: int, user_id: int, limit: int = 50) -> List[sqlite3.Row]:
-    conn = db(); cur = conn.cursor()
-    cur.execute("SELECT * FROM orders WHERE shop_owner_id=? AND user_id=? ORDER BY created_at DESC LIMIT ?",
-                (shop_owner_id, user_id, int(limit)))
-    rows = cur.fetchall(); conn.close()
-    return rows
-
-def get_order(shop_owner_id: int, order_id: str) -> Optional[sqlite3.Row]:
-    conn = db(); cur = conn.cursor()
-    cur.execute("SELECT * FROM orders WHERE shop_owner_id=? AND order_id=?", (shop_owner_id, order_id))
-    r = cur.fetchone(); conn.close()
-    return r
 
 
 
@@ -2000,14 +1343,16 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         set_balance(sid, uid, bal - total)
         keys = pop_keys(sid, pid, uid, qty)
 
+        # Create order + history
         order_id = gen_order_id(10)
         try:
             order_id = create_order(sid, uid, pid, p["name"], qty, total, keys)
         except Exception:
+            # don't block delivery
             pass
-            log_tx(sid, uid, "purchase", -total, f"{p['name']} | {order_id}", qty)
-        except Exception:
-            pass
+
+        # Always log purchase in history
+        log_tx(sid, uid, "purchase", -total, f"{p['name']} | {order_id}", qty)
 
         link = (p["tg_link"] or "").strip()
 
@@ -2127,7 +1472,7 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             return
         s = get_shop_settings(sid)
         bal = get_balance(sid, uid)
-        wmsg = (s["wallet_message"] or "").strip() or "No wallet message set yet."
+        wmsg = (s["wallet_message"] or "").strip()
         text = f"💰 <b>Wallet</b>\n\nBalance: <b>{money(bal)} {esc(CURRENCY)}</b>\n\n{esc(wmsg)}"
         await update.callback_query.message.reply_text(
             text, parse_mode=ParseMode.HTML,
@@ -3113,14 +2458,17 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
     # Super Admin area
     async def super_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
+        if not is_super(update.effective_user.id):
+            await update.callback_query.message.reply_text('❌ Not allowed.')
+            return
         txt = (
             "👑 <b>Super Admin Panel</b>\n\n"
             "• Edit Connect My Bot text/buttons\n"
             "• Manage sellers and deposits\n"
         )
         rows = [
-            [InlineKeyboardButton("✏️ Edit Connect My Bot Text", callback_data="sa:editui")],
-            [InlineKeyboardButton("✏️ Edit All Buttons / Descriptions", callback_data="sa:editall")],
+            [InlineKeyboardButton("✏️ Edit Button/Desc", callback_data="sa:editui")],
+            [InlineKeyboardButton("📝 Edit UI Texts (EN)", callback_data="sa:edittexts")],
             [InlineKeyboardButton("🧾 Sellers List", callback_data="sa:sellers")],
             [InlineKeyboardButton("⬅️ Menu", callback_data="m:menu")]
         ]
@@ -3151,6 +2499,52 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         rows.append([InlineKeyboardButton("⬅️ Back", callback_data="sa:home")])
 
         await update.callback_query.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, reply_markup=kb(rows))
+
+    async def sa_edittexts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
+        if not is_super(update.effective_user.id):
+            await update.callback_query.message.reply_text("❌ Not allowed.")
+            return
+
+        # Keys we allow editing (English only)
+        keys = [
+            ("btn_products", "Menu Button: Products"),
+            ("btn_wallet", "Menu Button: Wallet"),
+            ("btn_history", "Menu Button: History"),
+            ("btn_support", "Menu Button: Support"),
+            ("btn_connect", "Menu Button: Connect My Bot"),
+            ("btn_lang", "Menu Button: Language"),
+            ("btn_admin", "Menu Button: Admin Panel"),
+            ("btn_super", "Menu Button: Super Admin"),
+            ("btn_extend", "Menu Button: Extend Subscription"),
+            ("lang_title", "Language Screen Title"),
+            ("lang_saved", "Language Saved Message"),
+        ]
+
+        rows = []
+        for k, label in keys:
+            cur = ui_get(k) or (TRANSLATIONS.get('en', {}).get(k, k))
+            rows.append([InlineKeyboardButton(f"✏️ {label}", callback_data=f"sa:edittext:{k}")])
+            rows.append([InlineKeyboardButton(f"• Current: {cur[:35] + ('…' if len(cur)>35 else '')}", callback_data="sa:noop")])
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data="m:super")])
+        await update.callback_query.message.reply_text("📝 <b>Edit UI Texts (English)</b>\nTap a field to edit.", parse_mode=ParseMode.HTML, reply_markup=kb(rows))
+
+    async def sa_edittext_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.callback_query.answer()
+        if not is_super(update.effective_user.id):
+            await update.callback_query.message.reply_text("❌ Not allowed.")
+            return
+        key = update.callback_query.data.split(":", 2)[2]
+        set_state(context, "sa_edittext", {"key": key})
+        cur = ui_get(key) or (TRANSLATIONS.get('en', {}).get(key, key))
+        msg = f"Send new text for <b>{esc(key)}</b>\n\nCurrent: <code>{esc(cur)}</code>\n\nSend \'-\' to reset to default."
+
+        await update.callback_query.message.reply_text(msg,
+
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb([[InlineKeyboardButton("⬅️ Cancel", callback_data="m:super")]])
+        )
+
 
     async def sa_editui_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.answer()
@@ -3328,19 +2722,6 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             await update.message.reply_text("✅ Updated.", reply_markup=kb([[InlineKeyboardButton("⬅️ Super Admin", callback_data="sa:home")]]))
             return
 
-        # super admin: edit ui texts (all buttons/descriptions)
-        if state == "sa_edittext":
-            lang = data.get("lang", "en")
-            key = data.get("key")
-            txt = (update.message.text or update.message.caption or "").strip()
-            if not key:
-                clear_state(context)
-                return
-            ui_text_set(lang, key, txt)
-            clear_state(context)
-            await update.message.reply_text(tr(update.effective_user.id, "ui_saved"), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(tr(update.effective_user.id, "ui_back"), callback_data="sa:editall")]]), parse_mode=ParseMode.HTML)
-            return
-
         if state == "await_token":
             await token_text(update, context); return
 
@@ -3472,18 +2853,24 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             await update.message.reply_text(f"✅ Updated seller balance. New: {money(get_balance(SUPER_ADMIN_ID, sid))} {CURRENCY}")
             return
 
+
+        # super admin edit english ui text
+        if state == "sa_edittext":
+            key = (data.get("key") or "").strip()
+            val = (update.message.text or "").strip()
+            clear_state(context)
+            if val == "-":
+                ui_delete(key)
+                await update.message.reply_text("✅ Reset to default.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data="m:super")]]))
+            else:
+                ui_set(key, val)
+                await update.message.reply_text("✅ Saved.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data="m:super")]]))
+            return
         # super search
         if state == "super_search":
             await super_search_text(update, context); return
 
         # order id search (admin)
-        if state == "order_search":
-            sid = int(data.get("shop_id") or 0)
-            oid = (update.message.text or "").strip()
-            clear_state(context)
-            if not oid:
-                await update.message.reply_text(tr(update.effective_user.id, "no_match"), reply_markup=admin_panel_kb(sid))
-                return
             o = get_order_by_id(oid) if 'get_order_by_id' in globals() else None
             # Fallback to get_order() if present
             if not o and 'get_order' in globals():
@@ -3926,69 +3313,13 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             await sa_editui(update, context); return
         if data.startswith("sa:editui:pick:"):
             await sa_editui_pick(update, context); return
-        if data == "sa:editall":
-            await sa_editall_open(update, context); return
-        if data.startswith("sa:editall:lang:"):
-            lang = data.split(":")[-1]
-            await sa_editall_lang(update, context, lang); return
-        if data.startswith("sa:editall:key:"):
-            _p = data.split(":")
-            # sa:editall:key:<lang>:<key>
-            if len(_p) >= 5:
-                lang = _p[3]
-                key = ":".join(_p[4:])
-                await sa_editall_key(update, context, lang, key); return
         if data.startswith("sa:"):
             await super_action(update, context); return
 
         await q.answer()
 
-    # --------------------------
-    # Super Admin: Edit ALL UI Texts (buttons + descriptions) per language
-    # --------------------------
-    EDITABLE_UI_KEYS = [
-        # Main buttons
-        "btn_products", "btn_wallet", "btn_history", "btn_support", "btn_connect",
-        "btn_admin", "btn_super", "btn_extend", "btn_lang",
-        # Language screen
-        "lang_title", "lang_saved",
-        # Connect My Bot screen
-        "connect_desc", "connect_free_title", "connect_free_desc", "connect_premium_title", "connect_premium_desc",
-        # Common messages
-        "no_match",
-    ]
-
-    async def sa_editall_open(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        q = update.callback_query
-        await q.answer()
-        # pick language to edit
-        kb = []
-        for lang, name in SUPPORTED_LANGS.items():
-            kb.append([InlineKeyboardButton(f"{name}", callback_data=f"sa:editall:lang:{lang}")])
-        kb.append([InlineKeyboardButton(tr(q.from_user.id, "ui_back"), callback_data="sa:home")])
-        await q.edit_message_text(tr(q.from_user.id, "ui_choose_lang"), reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML)
-
-    async def sa_editall_lang(update: Update, context: ContextTypes.DEFAULT_TYPE, lang: str) -> None:
-        q = update.callback_query
-        await q.answer()
-        kb = []
-        for k in EDITABLE_UI_KEYS:
-            preview = ui_text_get(lang, k) or (TRANSLATIONS.get(lang, {}) or {}).get(k) or (TRANSLATIONS.get("en", {}) or {}).get(k) or k
-            preview = (preview[:28] + "…") if len(preview) > 28 else preview
-            kb.append([InlineKeyboardButton(f"{k} → {preview}", callback_data=f"sa:editall:key:{lang}:{k}")])
-        kb.append([InlineKeyboardButton(tr(q.from_user.id, "ui_back"), callback_data="sa:editall")])
-        await q.edit_message_text(tr(q.from_user.id, "ui_choose_key"), reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML)
-
-    async def sa_editall_key(update: Update, context: ContextTypes.DEFAULT_TYPE, lang: str, key: str) -> None:
-        q = update.callback_query
-        await q.answer()
-        cur = ui_text_get(lang, key)
-        base = (TRANSLATIONS.get(lang, {}) or {}).get(key) or (TRANSLATIONS.get("en", {}) or {}).get(key) or ""
-        msg = f"{tr(q.from_user.id, 'ui_send_new')}\n\n<b>Language:</b> <code>{lang}</code>\n<b>Key:</b> <code>{key}</code>\n\n<b>Current override:</b> {html_escape(cur) if cur else '<i>(none)</i>'}\n<b>Default:</b> {html_escape(base) if base else '<i>(none)</i>'}"
-        set_state(context, q.from_user.id, "sa_edittext", {"lang": lang, "key": key})
-        await q.edit_message_text(msg, parse_mode=ParseMode.HTML)
-
-    async def extra_text_states(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # extra: handle edit cat/sub name states in text_or_media via simple hooks
+    async def extra_text_states(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state, data = get_state(context)
         if state == "mg_edit_cat_name":
             sid = int(data["shop_id"]); cat_id = int(data["cat_id"])
