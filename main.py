@@ -2925,6 +2925,17 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             [InlineKeyboardButton("🔔 Warn Expiring", callback_data=f"sa:warn:{sid}")],
             [InlineKeyboardButton("⬅️ Back", callback_data="sa:sellers")]
         ]
+        # Seller bot controls (Super Admin)
+        sb = get_seller_bot(sid)
+        if sb and (sb["bot_username"] or "").strip():
+            bot_un = (sb["bot_username"] or "").strip().lstrip("@")
+            rows.insert(0, [InlineKeyboardButton("🤖 View Bot", url=f"https://t.me/{bot_un}")])
+            rows.insert(1, [InlineKeyboardButton("▶️ Start Bot", callback_data=f"sa:startbot:{sid}"),
+                            InlineKeyboardButton("⏹ Stop Bot", callback_data=f"sa:stopbot:{sid}")])
+            rows.insert(2, [InlineKeyboardButton("🔌 Disconnect Bot", callback_data=f"sa:disconnect:{sid}")])
+
+
+
         await update.callback_query.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb(rows))
 
     async def super_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2967,6 +2978,39 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
         elif act == "bal":
             set_state(context, "super_edit_balance", {"seller_id": sid})
             await update.callback_query.message.reply_text("Send amount (+add or -deduct), example: +10 or -5")
+
+        elif act == "startbot":
+            sb = get_seller_bot(sid)
+            if not sb:
+                await update.callback_query.message.reply_text("No bot connected for this seller.")
+                return
+            conn = db(); cur = conn.cursor()
+            cur.execute("UPDATE seller_bots SET enabled=1, updated_at=? WHERE seller_id=?", (ts(), sid))
+            conn.commit(); conn.close()
+            if seller_active(sid) and int(seller_row(sid)["banned_shop"] or 0) == 0:
+                try:
+                    await MANAGER.start_seller_bot(sid, sb["bot_token"])
+                except Exception:
+                    log.exception("Failed to start seller bot via super admin")
+            await update.callback_query.message.reply_text("✅ Bot started (if subscription active).")
+
+        elif act == "stopbot":
+            try:
+                await MANAGER.stop_seller_bot(sid)
+            except Exception:
+                pass
+            await update.callback_query.message.reply_text("✅ Bot stopped.")
+
+        elif act == "disconnect":
+            try:
+                await MANAGER.stop_seller_bot(sid)
+            except Exception:
+                pass
+            conn = db(); cur = conn.cursor()
+            cur.execute("DELETE FROM seller_bots WHERE seller_id=?", (sid,))
+            conn.commit(); conn.close()
+            await update.callback_query.message.reply_text("✅ Bot disconnected (removed).")
+
         elif act == "warn":
             try:
                 await context.bot.send_message(sid, "⏳ Your subscription is ending soon. Please renew in Main Shop.")
