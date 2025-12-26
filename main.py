@@ -1226,6 +1226,24 @@ def clear_keys(shop_owner_id: int, pid: int):
     cur.execute("DELETE FROM product_keys WHERE shop_owner_id=? AND product_id=? AND delivered_once=0", (shop_owner_id, pid))
     conn.commit(); conn.close()
 
+
+def list_product_keys(shop_owner_id: int, product_id: int, limit: int = 20, offset: int = 0) -> List[sqlite3.Row]:
+    conn = db(); cur = conn.cursor()
+    cur.execute("""SELECT * FROM product_keys
+                   WHERE shop_owner_id=? AND product_id=?
+                   ORDER BY id ASC LIMIT ? OFFSET ?""",
+                (shop_owner_id, product_id, int(limit), int(offset)))
+    rows = cur.fetchall(); conn.close()
+    return rows
+
+def count_product_keys(shop_owner_id: int, product_id: int) -> int:
+    conn = db(); cur = conn.cursor()
+    cur.execute("""SELECT COUNT(1) c FROM product_keys WHERE shop_owner_id=? AND product_id=?""",
+                (shop_owner_id, product_id))
+    r = cur.fetchone(); conn.close()
+    return int(r["c"] or 0) if r else 0
+
+
 def pop_keys(shop_owner_id: int, pid: int, uid: int, qty: int) -> List[str]:
     conn = db(); cur = conn.cursor()
     cur.execute("""SELECT id, key_line FROM product_keys
@@ -2764,11 +2782,88 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             [InlineKeyboardButton("🖼 Set Media", callback_data=f"mg:media:{sid}:{pid}")],
             [InlineKeyboardButton("🔗 Set Private Link", callback_data=f"mg:link:{sid}:{pid}")],
             [InlineKeyboardButton(f"🔑 Add Keys (stock {st})", callback_data=f"mg:keys:{sid}:{pid}")],
+            [InlineKeyboardButton("🔍 View All Keys", callback_data=f"mg:viewkeys:{sid}:{pid}:0")],
             [InlineKeyboardButton("🧹 Clear Keys", callback_data=f"mg:clearkeys:{sid}:{pid}")],
             [InlineKeyboardButton("🗑 Delete Product", callback_data=f"mg:delprod:{sid}:{pid}")],
             [InlineKeyboardButton("⬅️ Back", callback_data=f"mg:sub:{sid}:{p['category_id']}:{p['cocategory_id']}")],
         ]
         await update.callback_query.message.reply_text(f"🛒 <b>{esc(p['name'])}</b>\nStock: <b>{st}</b>", parse_mode=ParseMode.HTML, reply_markup=kb(rows))
+
+
+async def mg_viewkeys(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    parts = update.callback_query.data.split(":")
+    # mg:viewkeys:sid:pid:page
+    sid = int(parts[2]); pid = int(parts[3]); page = int(parts[4])
+    per_page = 15
+    total = count_product_keys(sid, pid)
+    offset = max(0, page) * per_page
+    rows_db = list_product_keys(sid, pid, limit=per_page, offset=offset)
+
+    if not rows_db:
+        await update.callback_query.message.reply_text(
+            "No keys found for this product.",
+            reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:prod:{sid}:{pid}")]])
+        )
+        return
+
+    lines = [f"🔑 <b>All Keys</b> (page {page+1})\n"]
+    btn_rows = []
+    for r in rows_db:
+        kid = int(r["id"])
+        key_line = (r["key_line"] or "").strip()
+        delivered = int(r["delivered_once"] or 0) == 1
+        mark = "✅ Delivered" if delivered else "🟢 Unused"
+        lines.append(f"<b>#{kid}</b> — {mark}\n<code>{esc(key_line)}</code>")
+        if not delivered:
+            btn_rows.append([InlineKeyboardButton(f"❌ Delete #{kid}", callback_data=f"mg:delkey:{sid}:{pid}:{kid}:{page}")])
+
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"mg:viewkeys:{sid}:{pid}:{page-1}"))
+    if offset + per_page < total:
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"mg:viewkeys:{sid}:{pid}:{page+1}"))
+    if nav:
+        btn_rows.append(nav)
+
+    btn_rows.append([InlineKeyboardButton("🗑 Delete ALL Unused Keys", callback_data=f"mg:delallkeys:{sid}:{pid}")])
+    btn_rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"mg:prod:{sid}:{pid}")])
+
+    await update.callback_query.message.reply_text(
+        "\n\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        reply_markup=kb(btn_rows[:90])
+    )
+
+async def mg_delkey(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    # mg:delkey:sid:pid:keyid:page
+    _, _, sid_s, pid_s, kid_s, page_s = update.callback_query.data.split(":")
+    sid = int(sid_s); pid = int(pid_s); kid = int(kid_s); page = int(page_s)
+
+    conn = db(); cur = conn.cursor()
+    cur.execute("SELECT delivered_once FROM product_keys WHERE shop_owner_id=? AND id=? AND product_id=?", (sid, kid, pid))
+    r = cur.fetchone()
+    if not r:
+        conn.close()
+        await update.callback_query.message.reply_text("Key not found.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:viewkeys:{sid}:{pid}:{page}")]]))
+        return
+    if int(r["delivered_once"] or 0) == 1:
+        conn.close()
+        await update.callback_query.message.reply_text("❌ Cannot delete a delivered key.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:viewkeys:{sid}:{pid}:{page}")]]))
+        return
+
+    cur.execute("DELETE FROM product_keys WHERE shop_owner_id=? AND id=? AND product_id=? AND delivered_once=0", (sid, kid, pid))
+    conn.commit(); conn.close()
+    await update.callback_query.message.reply_text("✅ Key deleted.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:viewkeys:{sid}:{pid}:{page}")]]))
+
+async def mg_delallkeys(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    _, _, sid_s, pid_s = update.callback_query.data.split(":")
+    sid = int(sid_s); pid = int(pid_s)
+    clear_keys(sid, pid)
+    await update.callback_query.message.reply_text("✅ Deleted all UNUSED keys.", reply_markup=kb([[InlineKeyboardButton("⬅️ Back", callback_data=f"mg:prod:{sid}:{pid}")]]))
+
 
     # Super Admin area
     async def super_open(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3556,6 +3651,14 @@ def register_handlers(app: Application, shop_owner_id: int, bot_kind: str):
             await mg_addprod(update, context); return
         if data.startswith("mg:prod:"):
             await mg_prod_open(update, context); return
+
+
+        if data.startswith("mg:viewkeys:"):
+            await mg_viewkeys(update, context); return
+        if data.startswith("mg:delkey:"):
+            await mg_delkey(update, context); return
+        if data.startswith("mg:delallkeys:"):
+            await mg_delallkeys(update, context); return
 
         # product edit actions
         if data.startswith("mg:editname:"):
